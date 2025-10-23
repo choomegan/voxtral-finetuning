@@ -1,0 +1,7 @@
+torch
+datasets
+peft
+transformers
+mistral-common
+omegaconf
+soundfile

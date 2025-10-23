@@ -1,0 +1,28 @@
+model: mistralai/Voxtral-Mini-3B-2507
+
+data:
+  train_manifest: /mnt/d/MEGAN/data/PORT/mms_set_1/dev_split/dev_manifest_short.json
+  eval_manifest: /mnt/d/MEGAN/data/PORT/mms_set_1/dev_split/dev_manifest_short.json
+
+lora:
+  r: 8
+  alpha: 32
+  dropout: 0.0
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+trainer:
+  epochs: 3
+  lr: 5e-5
+  grad_accum: 4
+  train_batch_size: 2
+  eval_batch_size: 4
+  logging_steps: 2
+  save_steps: 5
+  eval_steps: 5
+  bf16: True
+  save_total_limit: 2
+
+exp_manager:
+  name: testtest
+  exp_dir: experiments
+  logger: tensorboard # wandb or tensorboard
