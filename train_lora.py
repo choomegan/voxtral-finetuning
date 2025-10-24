@@ -8,7 +8,9 @@ from transformers import (
     VoxtralProcessor,
     Trainer,
     TrainingArguments,
+    BitsAndBytesConfig,
 )
+import wandb
 from peft import LoraConfig, get_peft_model
 from omegaconf import OmegaConf
 
@@ -141,6 +143,9 @@ def main():
     # Load training config
     config = OmegaConf.load("config/train.yaml")
 
+    if config.exp_manager.logger == "wandb":
+        wandb.init(project=config.exp_manager.wandb.project, name=config.exp_manager.name)
+
     # Generate timestamped experiment name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_name = f"{config.exp_manager.name}_{timestamp}"
@@ -153,9 +158,40 @@ def main():
     torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {torch_device}")
 
-    # Load processor and model
-    print("Loading processor and model...")
+    print("Loading datasets...")
+    #################### Load datasets from manifest files #############################
+    train_dataset = load_manifest_dataset(config.data.train_manifest)
+    eval_dataset = load_manifest_dataset(config.data.eval_manifest)
+
+
+    print("Loading processor...")
     processor = VoxtralProcessor.from_pretrained(model_checkpoint)
+
+    # Setup data collator
+    data_collator = VoxtralDataCollator(processor, model_checkpoint)
+
+    ########################### Load processor and model ###############################
+    print("Loading model...")
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,                # Quantize model weights to 4-bit
+        bnb_4bit_use_double_quant=True,   # Secondary quantization for smaller memory footprint
+        bnb_4bit_quant_type="nf4",        # NormalFloat4 – best balance of quality & compression
+        bnb_4bit_compute_dtype=torch.float16,  # A6000 supports bf16 natively
+    )
+
+
+    # print number of parameters in model
+    model = VoxtralForConditionalGeneration.from_pretrained(
+        model_checkpoint, 
+        torch_dtype=torch.float16, 
+        quantization_config=bnb_config, 
+        device_map="auto"
+    )
+
+    print(type(model.audio_tower))
+    print("audio encoder layers:", len(model.audio_tower.layers))
+
     # Load model with LoRA configuration
     lora_config = LoraConfig(
         r=config.lora.r,  # Rank of LoRA
@@ -165,23 +201,17 @@ def main():
         target_modules=list(config.lora.target_modules),
         task_type="SEQ_2_SEQ_LM",
     )
-    # print number of parameters in model
-    model = VoxtralForConditionalGeneration.from_pretrained(
-        model_checkpoint, torch_dtype=torch.bfloat16, device_map="auto"
-    )
-    # Freeze the audio encoder model.audio_tower
-    for param in model.audio_tower.parameters():
-        param.requires_grad = False
+
+    # Partial unFreeze the audio encoder model.audio_tower
+    for name, param in model.audio_tower.named_parameters():
+        if any(f"block.{i}." in name for i in range(28,32)):  # top 4 layers
+            param.requires_grad = True
+        else:
+            param.requires_grad = False
 
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
-    # Load datasets from manifest files
-    train_dataset = load_manifest_dataset(config.data.train_manifest)
-    eval_dataset = load_manifest_dataset(config.data.eval_manifest)
-
-    # Setup data collator
-    data_collator = VoxtralDataCollator(processor, model_checkpoint)
 
     # Simple training arguments
     training_args = TrainingArguments(
