@@ -5,3 +5,10 @@ transformers
 mistral-common
 omegaconf
 soundfile
+bitsandbytes
+torchcodec
+evaluate
+jiwer
+
+wandb
+tensorboardX
