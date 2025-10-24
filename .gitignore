@@ -1,2 +1,4 @@
 experiments/
 .venv
+wandb/
+*.json
