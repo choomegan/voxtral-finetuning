@@ -1,18 +1,20 @@
-from datetime import datetime
-import os
 import json
+import os
+from datetime import datetime
+
 import torch
 from datasets import Audio, Dataset
+from omegaconf import OmegaConf
+from peft import LoraConfig, get_peft_model
 from transformers import (
-    VoxtralForConditionalGeneration,
-    VoxtralProcessor,
+    BitsAndBytesConfig,
     Trainer,
     TrainingArguments,
-    BitsAndBytesConfig,
+    VoxtralForConditionalGeneration,
+    VoxtralProcessor,
 )
+
 import wandb
-from peft import LoraConfig, get_peft_model
-from omegaconf import OmegaConf
 
 
 class VoxtralDataCollator:
@@ -144,7 +146,9 @@ def main():
     config = OmegaConf.load("config/train.yaml")
 
     if config.exp_manager.logger == "wandb":
-        wandb.init(project=config.exp_manager.wandb.project, name=config.exp_manager.name)
+        wandb.init(
+            project=config.exp_manager.wandb.project, name=config.exp_manager.name
+        )
 
     # Generate timestamped experiment name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -163,7 +167,6 @@ def main():
     train_dataset = load_manifest_dataset(config.data.train_manifest)
     eval_dataset = load_manifest_dataset(config.data.eval_manifest)
 
-
     print("Loading processor...")
     processor = VoxtralProcessor.from_pretrained(model_checkpoint)
 
@@ -174,19 +177,18 @@ def main():
     print("Loading model...")
 
     bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,                # Quantize model weights to 4-bit
-        bnb_4bit_use_double_quant=True,   # Secondary quantization for smaller memory footprint
-        bnb_4bit_quant_type="nf4",        # NormalFloat4 – best balance of quality & compression
+        load_in_4bit=True,  # Quantize model weights to 4-bit
+        bnb_4bit_use_double_quant=True,  # Secondary quantization for smaller memory footprint
+        bnb_4bit_quant_type="nf4",  # NormalFloat4 – best balance of quality & compression
         bnb_4bit_compute_dtype=torch.float16,  # A6000 supports bf16 natively
     )
 
-
     # print number of parameters in model
     model = VoxtralForConditionalGeneration.from_pretrained(
-        model_checkpoint, 
-        torch_dtype=torch.float16, 
-        quantization_config=bnb_config, 
-        device_map="auto"
+        model_checkpoint,
+        torch_dtype=torch.float16,
+        quantization_config=bnb_config,
+        device_map="auto",
     )
 
     print(type(model.audio_tower))
@@ -203,15 +205,26 @@ def main():
     )
 
     # Partial unFreeze the audio encoder model.audio_tower
-    for name, param in model.audio_tower.named_parameters():
-        if any(f"block.{i}." in name for i in range(28,32)):  # top 4 layers
-            param.requires_grad = True
-        else:
-            param.requires_grad = False
-
+    # for name, param in model.audio_tower.named_parameters():
+    #     if any(f"block.{i}." in name for i in range(28,32)):  # top 4 layers
+    #         param.requires_grad = True
+    #     else:
+    #         param.requires_grad = False
+    # Optional - dont train audio encoder
+    for param in model.audio_tower.parameters():
+        param.requires_grad = False
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
+    steps_per_epoch = (
+        len(train_dataset) // config.trainer.train_batch_size
+        // config.trainer.grad_accum
+    )
+    total_training_steps = steps_per_epoch * config.trainer.epochs
+
+    # Compute warmup steps from ratio
+    warmup_ratio = config.trainer.warmup_ratio
+    warmup_steps = int(total_training_steps * warmup_ratio)
 
     # Simple training arguments
     training_args = TrainingArguments(
@@ -221,6 +234,7 @@ def main():
         gradient_accumulation_steps=config.trainer.grad_accum,
         learning_rate=config.trainer.lr,
         num_train_epochs=config.trainer.epochs,
+        warmup_steps=warmup_steps,
         bf16=config.trainer.bf16,
         logging_steps=config.trainer.logging_steps,
         eval_steps=config.trainer.eval_steps if eval_dataset else None,
@@ -234,6 +248,8 @@ def main():
         report_to=config.exp_manager.logger,
         remove_unused_columns=False,
         dataloader_num_workers=1,
+        lr_scheduler_type="cosine",
+        seed=3407,
     )
 
     # Setup trainer
