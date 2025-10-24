@@ -19,6 +19,7 @@ trainer:
   logging_steps: 2
   save_steps: 250
   eval_steps: 250
+  warmup_ratio: 0.05
   bf16: False
   save_total_limit: 2
 
