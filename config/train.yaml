@@ -17,12 +17,16 @@ trainer:
   train_batch_size: 2
   eval_batch_size: 4
   logging_steps: 2
-  save_steps: 5
-  eval_steps: 5
-  bf16: True
+  save_steps: 250
+  eval_steps: 250
+  bf16: False
   save_total_limit: 2
 
 exp_manager:
   name: testtest
   exp_dir: experiments
-  logger: tensorboard # wandb or tensorboard
+  logger: wandb # wandb or tensorboard
+  wandb:
+    project: voxtral-lora-finetuning
+
+  
