@@ -122,6 +122,10 @@ def load_manifest_dataset(manifest_path, sample_rate=16000):
     with open(manifest_path, "r", encoding="utf-8") as f:
         for line in f:
             entry = json.loads(line.strip())
+
+            # Normalize text
+            entry["text"] = entry["text"].lower().strip()
+
             # Prepend the manifest's directory if path is relative
             audio_path = entry["audio_filepath"]
             if not os.path.isabs(audio_path):
