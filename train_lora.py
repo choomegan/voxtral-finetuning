@@ -214,10 +214,19 @@ def main():
     for param in model.audio_tower.parameters():
         param.requires_grad = False
     model = get_peft_model(model, lora_config)
+
+    # Enable gradient checkpointing manually instead of via TrainingArguments.
+    # When using LoRA/PEFT, enabling checkpointing through TrainerArgs alone causes
+    # inputs to lose their requires_grad flag — leading to "tensor does not require grad" errors.
+    # Calling these methods directly ensures input gradients are tracked correctly for LoRA layers.
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
+
     model.print_trainable_parameters()
 
     steps_per_epoch = (
-        len(train_dataset) // config.trainer.train_batch_size
+        len(train_dataset)
+        // config.trainer.train_batch_size
         // config.trainer.grad_accum
     )
     total_training_steps = steps_per_epoch * config.trainer.epochs
