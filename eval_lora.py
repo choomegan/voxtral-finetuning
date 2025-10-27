@@ -33,9 +33,11 @@ def load_manifest_dataset(manifest_path, sample_rate=16000):
             data.append(entry)
 
     # Create Hugging Face dataset and cast audio column
-    dataset = Dataset.from_list(data).cast_column(
-        "audio_filepath", Audio(sampling_rate=sample_rate)
-    )
+    dataset = Dataset.from_list(data)
+    dataset = dataset.add_column("original_audio_filepath", [x["audio_filepath"].replace(root_dir,"") for x in data])
+
+    # Cast audio column and rename for processor compatibility
+    dataset = dataset.cast_column("audio_filepath", Audio(sampling_rate=sample_rate))
     dataset = dataset.rename_column("audio_filepath", "audio")
 
     print(f"Loaded {len(dataset)} samples.")
@@ -51,7 +53,7 @@ def transcribe_batch(model, processor, audio_batch, device):
             language="en",
             audio=audio_batch["array"],
             format=["WAV"],
-            model_id="mistralai/Voxtral-Mini-3B-2507",
+            model_id="mistralai/Voxtral-Small-24B-2507",
         ).to(device)
 
         generated_tokens = model.generate(
