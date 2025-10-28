@@ -150,13 +150,27 @@ def main():
     config = OmegaConf.load("config/train.yaml")
 
     if config.exp_manager.logger == "wandb":
-        wandb.init(
-            project=config.exp_manager.wandb.project, name=config.exp_manager.name
-        )
+        if config.trainer.resume_from_checkpoint and config.exp_manager.wandb.run_id:
+            # resume existing run
+            wandb.init(
+                project=config.exp_manager.wandb.project,
+                id=config.exp_manager.wandb.run_id,
+                resume="must",
+            )
+        else:
+            # start a new run
+            wandb.init(
+                project=config.exp_manager.wandb.project, name=config.exp_manager.name
+            )
 
     # Generate timestamped experiment name
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_name = f"{config.exp_manager.name}_{timestamp}"
+    if config.trainer.resume_from_checkpoint:
+        exp_prefix = f"{config.exp_manager.name}_RESUME"
+    else:
+        exp_prefix = config.exp_manager.name
+
+    exp_name = f"{exp_prefix}_{timestamp}"
 
     # Configuration
     model_checkpoint = config.model
@@ -236,8 +250,10 @@ def main():
     total_training_steps = steps_per_epoch * config.trainer.epochs
 
     # Compute warmup steps from ratio
-    warmup_ratio = config.trainer.warmup_ratio
-    warmup_steps = int(total_training_steps * warmup_ratio)
+    # warmup_ratio = config.trainer.warmup_ratio
+    warmup_steps = (
+        config.trainer.warmup_steps
+    )  # int(total_training_steps * warmup_ratio)
 
     # Simple training arguments
     training_args = TrainingArguments(
@@ -276,7 +292,13 @@ def main():
 
     # Start training
     print("Starting training...")
-    trainer.train()
+    if config.trainer.resume_from_checkpoint is not None:
+        print(
+            f"Resuming training from checkpoint: {config.trainer.resume_from_checkpoint}"
+        )
+        trainer.train(resume_from_checkpoint=config.trainer.resume_from_checkpoint)
+    else:
+        trainer.train()
 
     # Save model and processor
     print(f"Saving model to {output_dir}")

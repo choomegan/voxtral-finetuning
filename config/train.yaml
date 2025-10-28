@@ -22,6 +22,7 @@ trainer:
   warmup_ratio: 0.05
   bf16: False
   save_total_limit: 2
+  resume_from_checkpoint: null # ckpt folder or null
 
 exp_manager:
   name: testtest
@@ -29,5 +30,5 @@ exp_manager:
   logger: wandb # wandb or tensorboard
   wandb:
     project: voxtral-lora-finetuning
-
+    run_id: null # only used for resuming runs
   
