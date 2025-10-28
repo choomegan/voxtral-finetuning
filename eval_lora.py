@@ -34,7 +34,10 @@ def load_manifest_dataset(manifest_path, sample_rate=16000):
 
     # Create Hugging Face dataset and cast audio column
     dataset = Dataset.from_list(data)
-    dataset = dataset.add_column("original_audio_filepath", [x["audio_filepath"].replace(root_dir,"") for x in data])
+    dataset = dataset.add_column(
+        "original_audio_filepath",
+        [x["audio_filepath"].replace(root_dir, "") for x in data],
+    )
 
     # Cast audio column and rename for processor compatibility
     dataset = dataset.cast_column("audio_filepath", Audio(sampling_rate=sample_rate))
@@ -44,7 +47,7 @@ def load_manifest_dataset(manifest_path, sample_rate=16000):
     return dataset
 
 
-def transcribe_batch(model, processor, audio_batch, device):
+def transcribe_batch(model, base_model_name, processor, audio_batch, device):
     """
     Run inference on a batch of audio clips.
     """
@@ -53,7 +56,7 @@ def transcribe_batch(model, processor, audio_batch, device):
             language="en",
             audio=audio_batch["array"],
             format=["WAV"],
-            model_id="mistralai/Voxtral-Small-24B-2507",
+            model_id=base_model_name,
         ).to(device)
 
         generated_tokens = model.generate(
@@ -71,25 +74,12 @@ def transcribe_batch(model, processor, audio_batch, device):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Evaluate a fine-tuned Voxtral model.")
-    parser.add_argument(
-        "--config", type=str, default="config/train.yaml", help="Path to config file."
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        required=True,
-        help="Path to model checkpoint directory.",
-    )
-    parser.add_argument(
-        "--output", type=str, default="eval_results.json", help="Where to save results."
-    )
-    args = parser.parse_args()
+
+    config = OmegaConf.load("config/eval.yaml")
 
     # Load config
-    config = OmegaConf.load(args.config)
-    manifest_path = config.data.eval_manifest
-    sample_rate = getattr(config.data, "sample_rate", 16000)
+    manifest_path = config.manifest
+    sample_rate = 16000
 
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -105,10 +95,10 @@ def main():
     ).to(device)
 
     # Check if checkpoint contains LoRA adapter
-    adapter_config = os.path.join(args.checkpoint, "adapter_config.json")
+    adapter_config = os.path.join(config.checkpoint_path, "adapter_config.json")
     if os.path.exists(adapter_config):
-        print(f"🔗 Detected LoRA adapter at {args.checkpoint} — loading it...")
-        model = PeftModel.from_pretrained(base_model, args.checkpoint)
+        print(f"🔗 Detected LoRA adapter at {config.checkpoint_path} — loading it...")
+        model = PeftModel.from_pretrained(base_model, config.checkpoint_path)
     else:
         print(f"⚠️ No adapter_config.json found — assuming full model checkpoint.")
         model = base_model
@@ -119,20 +109,22 @@ def main():
     dataset = load_manifest_dataset(manifest_path, sample_rate=sample_rate)
 
     # Prepare output file
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
-    if os.path.exists(args.output):
-        os.remove(args.output)
+    os.makedirs(os.path.dirname(config.output_path), exist_ok=True)
+    if os.path.exists(config.output_path):
+        os.remove(config.output_path)
 
     all_predictions, all_references = [], []
 
     print("Running inference...")
-    with open(args.output, "a", encoding="utf-8") as f_out:
+    with open(config.output_path, "a", encoding="utf-8") as f_out:
         for i, sample in enumerate(tqdm(dataset)):
             reference = sample["text"].strip()
             audio = sample["audio"]
 
             # Run transcription
-            prediction = transcribe_batch(model, processor, audio, device)[0].strip()
+            prediction = transcribe_batch(
+                model, config.model, processor, audio, device
+            )[0].strip()
 
             # Compute WER and CER for this example
             sample_wer = jiwer.wer(reference, prediction)
@@ -163,7 +155,7 @@ def main():
     print(f"✅ Corpus-level CER: {corpus_cer:.4f}")
 
     # Save summary at the end
-    summary_file = args.output + ".summary.json"
+    summary_file = config.output_path + ".summary.json"
     with open(summary_file, "w", encoding="utf-8") as f_sum:
         json.dump(
             {"corpus_wer": corpus_wer, "corpus_cer": corpus_cer},
@@ -171,7 +163,7 @@ def main():
             indent=2,
             ensure_ascii=False,
         )
-    print(f"📁 Saved per-sample results to: {args.output}")
+    print(f"📁 Saved per-sample results to: {config.output_path}")
     print(f"📊 Saved summary to: {summary_file}")
 
 
