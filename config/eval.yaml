@@ -1,0 +1,4 @@
+model: mistralai/Voxtral-Small-24B-2507
+checkpoint_path: mistralai/Voxtral-Small-24B-2507
+manifest: /home/dhuser/Desktop/MEGAN/data/PORT/mms_set_1/test_split/test_manifest_30s.json
+output_path: ./eval_results/eval_results.json
