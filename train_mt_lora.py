@@ -8,7 +8,7 @@ from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
 from transformers import (BitsAndBytesConfig, Trainer, TrainingArguments,
                           VoxtralForConditionalGeneration, VoxtralProcessor)
-
+from torch.nn.utils.rnn import pad_sequence
 import wandb
 
 # ===============================
@@ -33,7 +33,7 @@ class VoxtralSTDataCollator:
           "target": {"text": str, "lang": "eng"}
         }
         """
-        print(features[0])
+        # print(features[0])
         # Load inputs
         audios = [f["source.audio"]["array"] for f in features]
         src_langs = [f["source.lang"] for f in features]
@@ -66,8 +66,19 @@ class VoxtralSTDataCollator:
         # Tokenize prompt with MistralCommonTokenizer
         # print("prompt: ", prompts[0])
         # Stack tokenized prompt tensors
-        prompt_ids = torch.cat([p["input_ids"] for p in prompts], dim=0)
-        prompt_attn = torch.cat([p["attention_mask"] for p in prompts], dim=0)
+        # Pad all input_ids and attention_masks to same length
+        prompt_ids = pad_sequence(
+            [p["input_ids"].squeeze(0) for p in prompts],  # ensure 1D tensors
+            batch_first=True,
+            padding_value=self.pad_id,  # use tokenizer’s pad token id
+        )
+
+        prompt_attn = pad_sequence(
+            [p["attention_mask"].squeeze(0) for p in prompts],
+            batch_first=True,
+            padding_value=0,  # attention mask padding
+        )
+
         B = prompt_ids.size(0)
 
         # keep any extra fields (e.g., audio features) to pass through to the model
