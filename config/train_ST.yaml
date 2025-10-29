@@ -1,0 +1,35 @@
+model: mistralai/Voxtral-Mini-3B-2507
+
+data:
+  train_manifest: /home/dhuser/Desktop/MEGAN/data/PORT/mms_set_1/train_split/S2TT.json
+  eval_manifest: /home/dhuser/Desktop/MEGAN/data/PORT/mms_set_1/train_split/S2TT.json
+
+lora:
+  r: 8
+  alpha: 32
+  dropout: 0.05
+  target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+
+trainer:
+  epochs: 3
+  lr: 5e-5
+  grad_accum: 2
+  train_batch_size: 8
+  eval_batch_size: 8
+  logging_steps: 1
+  save_steps: 2
+  eval_steps: 2
+  warmup_steps: 0
+  load_in_4bit: False
+  bf16: True
+  save_total_limit: 2
+  resume_from_checkpoint: null # ckpt folder or null
+
+exp_manager:
+  name: test_s2tt
+  exp_dir: experiments
+  logger: tensorboard # wandb or tensorboard
+  wandb:
+    project: voxtral-s2tt
+    run_id: null # only used for resuming runs
+  
