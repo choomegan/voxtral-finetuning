@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
-import argparse
 import json
 import os
 
-import evaluate
 import jiwer
 import torch
 from datasets import Audio, Dataset
@@ -82,7 +80,7 @@ def main():
     sample_rate = 16000
 
     # Device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     # Load model & processor

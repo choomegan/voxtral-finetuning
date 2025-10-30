@@ -1,9 +1,7 @@
-import json
 import os
 from datetime import datetime
 
 import torch
-from datasets import Audio, Dataset
 from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
 from transformers import (
@@ -15,6 +13,8 @@ from transformers import (
 )
 
 import wandb
+
+from utils.asr_helper import load_asr_manifest_dataset
 
 
 class VoxtralDataCollator:
@@ -103,48 +103,6 @@ class VoxtralDataCollator:
         return batch
 
 
-def load_manifest_dataset(manifest_path, sample_rate=16000):
-    """
-    Load dataset from a JSONL manifest file and make audio filepaths absolute.
-    Each line should have:
-    {
-      "audio_filepath": "audio/audio_1.wav",
-      "duration": 5.038,
-      "start": 1166.599,
-      "end": 1171.637,
-      "text": "this is a transcript"
-    }
-    """
-    print(f"Loading dataset from: {manifest_path}")
-    root_dir = os.path.dirname(os.path.abspath(manifest_path))
-
-    data = []
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        for line in f:
-            entry = json.loads(line.strip())
-
-            # Normalize text
-            entry["text"] = entry["text"].lower().strip()
-
-            # Prepend the manifest's directory if path is relative
-            audio_path = entry["audio_filepath"]
-            if not os.path.isabs(audio_path):
-                audio_path = os.path.join(root_dir, audio_path)
-            entry["audio_filepath"] = os.path.normpath(audio_path)
-            data.append(entry)
-
-    dataset = Dataset.from_list(data)
-
-    # Decode audio on the fly
-    dataset = dataset.cast_column("audio_filepath", Audio(sampling_rate=sample_rate))
-
-    # Rename to match collator expectations
-    dataset = dataset.rename_column("audio_filepath", "audio")
-
-    print(f"Loaded {len(dataset)} samples from {manifest_path}")
-    return dataset
-
-
 def main():
     # Load training config
     config = OmegaConf.load("config/train.yaml")
@@ -182,8 +140,8 @@ def main():
 
     print("Loading datasets...")
     #################### Load datasets from manifest files #############################
-    train_dataset = load_manifest_dataset(config.data.train_manifest)
-    eval_dataset = load_manifest_dataset(config.data.eval_manifest)
+    train_dataset = load_asr_manifest_dataset(config.data.train_manifest)
+    eval_dataset = load_asr_manifest_dataset(config.data.eval_manifest)
 
     print("Loading processor...")
     processor = VoxtralProcessor.from_pretrained(model_checkpoint)
