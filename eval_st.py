@@ -14,21 +14,18 @@ import evaluate
 
 # Assuming st_helper.py is available in a utils/ directory
 # If using a mock environment, ensure this path is correct or copy the functions directly
-try:
-    from utils.st_helper import load_st_manifest_dataset, build_convos
-except ImportError:
-    print("FATAL: Cannot import utils.st_helper. Ensure the file is present.")
-    sys.exit(1)
+from utils.st_helper import load_st_manifest_dataset, build_convos
 
 
-def translate_sample(model, processor, audio_batch, src_lang, tgt_lang, device):
+def translate_sample(model, processor, audio_path, src_lang, tgt_lang, device):
     """
-    Run speech translation inference on one audio sample.
+    Run speech translation inference on one audio sample using the path-based
+    multimodal chat template. The processor handles feature extraction internally.
 
     Args:
         model: The Voxtral model (potentially wrapped with PeftModel).
         processor: The VoxtralProcessor.
-        audio_batch: Dictionary containing raw audio 'array' and 'sampling_rate'.
+        audio_path (str): Path to the audio file.
         src_lang (str): Source language code.
         tgt_lang (str): Target language code.
         device (torch.device): CUDA or CPU device.
@@ -37,42 +34,41 @@ def translate_sample(model, processor, audio_batch, src_lang, tgt_lang, device):
         str: The predicted translated text.
     """
     with torch.no_grad():
-        # 1. Build prompt for translation using the standard conversational structure
-        messages = build_convos(src_lang, tgt_lang)
+        # 1. Build the full multimodal prompt structure, including the audio file path
+        # This now uses the audio_path argument per your request.
+        messages = build_convos(src_lang, tgt_lang, audio_path)
 
-        # Tokenize the instruction part of the prompt
-        # We use a non-multimodal call for just the text instruction tokens
-        prompt = processor.apply_chat_template(
-            messages, tokenize=True, return_tensors="pt"
-        )
-
-        # 2. Extract audio features (mel spectrograms)
-        inputs = processor.feature_extractor(
-            raw_speech=audio_batch["array"],
-            sampling_rate=audio_batch["sampling_rate"],
+        # 2. Tokenize and process the full multimodal input
+        # The processor automatically loads the audio from the 'audio_path'
+        # specified in the messages and extracts features.
+        model_inputs = processor.apply_chat_template(
+            messages,
             return_tensors="pt",
+            tokenize=True,
+            padding="longest",
         )
 
-        # 3. Prepare multimodal input tensors and move to device
-        input_ids = prompt["input_ids"].to(device)
-        attention_mask = prompt["attention_mask"].to(device)
-        input_features = inputs["input_features"].to(device)
+        # Move inputs to device
+        input_ids = model_inputs["input_ids"].to(device)
+        attention_mask = model_inputs["attention_mask"].to(device)
+        input_features = model_inputs["input_features"].to(device)
 
-        model_inputs = {
+        # NOTE: model_inputs contains input_ids, attention_mask, and input_features.
+        generate_inputs = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "input_features": input_features,
         }
 
-        # 4. Generate the translation tokens
+        # 3. Generate the translation tokens
         generated_tokens = model.generate(
-            **model_inputs,
+            **generate_inputs,
             max_new_tokens=256,
             do_sample=False,
             num_beams=1,
         )
 
-        # 5. Decode the results
+        # 4. Decode the results
         # CRITICAL STEP: Slice off the prompt tokens (input_ids.shape[1])
         # from the generated sequence before decoding.
         decoded = processor.batch_decode(
@@ -117,7 +113,7 @@ def main():
     # Set model to evaluation mode (disables dropout, etc.)
     model.eval()
 
-    # Load dataset, ensuring audio is correctly mapped and sampled
+    # Load dataset. Note: The dataset now contains the 'audio_path' column.
     dataset = load_st_manifest_dataset(config.manifest, sample_rate=16000)
 
     # Prepare output files
@@ -136,20 +132,20 @@ def main():
             src_lang = sample["source.lang"]
             tgt_lang = sample["target.lang"]
             reference = sample["target.text"].strip()
-            audio = sample["source.audio"]
+            # New: Get the audio path instead of the loaded audio array
+            audio_path = sample["source.audio_local_path"]
 
             # Run translation
             prediction = translate_sample(
-                model, processor, audio, src_lang, tgt_lang, device
+                model, processor, audio_path, src_lang, tgt_lang, device  # Pass path
             )
 
             # Collect results for corpus-level metrics
             all_predictions.append(prediction)
-            # BLEU requires references to be a list of reference strings (even if only one)
             all_references.append([reference])
 
-            # Write per-sample result (excluding the large audio array)
-            meta = {k: v for k, v in sample.items() if k != "source.audio"}
+            # Write per-sample result
+            meta = {k: v for k, v in sample.items()}
             result = {
                 "prediction": prediction,
                 "reference": reference,
@@ -159,8 +155,6 @@ def main():
             f_out.write("\n")
 
     # --- Corpus-level metrics ---
-    # The reference must be a list of lists of strings (e.g., [['ref1'], ['ref2']])
-    # The prediction must be a list of strings (e.g., ['pred1', 'pred2'])
     corpus_bleu = bleu.compute(predictions=all_predictions, references=all_references)[
         "bleu"
     ]
