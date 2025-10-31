@@ -5,6 +5,7 @@ transformers
 mistral-common
 omegaconf
 soundfile
+librosa
 bitsandbytes
 torchcodec
 evaluate
