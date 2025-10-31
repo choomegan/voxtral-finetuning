@@ -9,6 +9,9 @@ librosa
 bitsandbytes
 torchcodec
 evaluate
+
+unbabel-comet
+sacrebleu
 jiwer
 
 num2words
