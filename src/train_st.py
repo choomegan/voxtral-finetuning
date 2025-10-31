@@ -1,9 +1,13 @@
-import json
+"""
+Training script for speech translation task
+"""
+
 import os
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import Any, Dict, List
+
 import torch
-from datasets import Audio, Dataset
+import wandb
 from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
 from transformers import (
@@ -13,13 +17,9 @@ from transformers import (
     VoxtralForConditionalGeneration,
     VoxtralProcessor,
 )
-from torch.nn.utils.rnn import pad_sequence
-import wandb
-from utils.st_helper import load_st_manifest_dataset, build_convos
 
-# ===============================
-#  Voxtral Data Collator (Speech Translation)
-# ===============================
+from utils.dataset_utils import load_st_manifest_dataset
+from utils.chat_template_utils import build_st_prompt
 
 
 class VoxtralSTDataCollator:
@@ -38,11 +38,10 @@ class VoxtralSTDataCollator:
 
         for f in features:
             src_lang = f["source.lang"]
-            tgt_lang = f["target.lang"]
             audio_path = f["source.audio_local_path"]
 
             # A. Prompt (User Message Only) - Used to calculate prompt length for masking
-            prompt_messages = build_convos(src_lang, tgt_lang, audio_path)
+            prompt_messages = build_st_prompt(src_lang, audio_path)
             prompts.append(prompt_messages)
 
             # B. Full Conversation (User Message + Target/Assistant Response) - Used for final input_ids and labels
@@ -106,7 +105,7 @@ class VoxtralSTDataCollator:
 
 def main():
     # Load config
-    config = OmegaConf.load("config/train_ST.yaml")
+    config = OmegaConf.load("config/train_st.yaml")
     os.environ["CUDA_VISIBLE_DEVICES"] = str(config.device_id)
 
     # --- WandB setup ---
@@ -147,11 +146,6 @@ def main():
 
     # --- Data collator ---
     data_collator = VoxtralSTDataCollator(processor, config.model)
-
-    # Take a few samples from train_dataset to simulate a DataLoader batch
-    sample_features = [train_dataset[i] for i in range(2)]  # 2 samples for testing
-
-    batch = data_collator(sample_features)
 
     # --- Model & LoRA setup ---
     print("Loading model...")
@@ -195,12 +189,6 @@ def main():
     model.print_trainable_parameters()
 
     # --- Training args ---
-    steps_per_epoch = (
-        len(train_dataset)
-        // config.trainer.train_batch_size
-        // config.trainer.grad_accum
-    )
-    total_steps = steps_per_epoch * config.trainer.epochs
     warmup_steps = config.trainer.warmup_steps
 
     training_args = TrainingArguments(

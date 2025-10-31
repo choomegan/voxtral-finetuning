@@ -1,7 +1,12 @@
+"""
+Training script for ASR task
+"""
+
 import os
 from datetime import datetime
 
 import torch
+import wandb
 from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
 from transformers import (
@@ -12,9 +17,7 @@ from transformers import (
     VoxtralProcessor,
 )
 
-import wandb
-
-from utils.asr_helper import load_asr_manifest_dataset
+from utils.dataset_utils import load_asr_manifest_dataset
 
 
 class VoxtralDataCollator:

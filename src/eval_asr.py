@@ -1,48 +1,18 @@
-#!/usr/bin/env python3
+"""
+Evaluation script for ASR task
+"""
+
 import json
 import os
 
 import jiwer
 import torch
-from datasets import Audio, Dataset
 from omegaconf import OmegaConf
 from peft import PeftModel
 from tqdm import tqdm
 from transformers import VoxtralForConditionalGeneration, VoxtralProcessor
 
-
-def load_manifest_dataset(manifest_path, sample_rate=16000):
-    """
-    Load dataset from a JSONL manifest file and automatically decode audio.
-    """
-    print(f"Loading dataset from: {manifest_path}")
-
-    root_dir = os.path.dirname(os.path.abspath(manifest_path))
-
-    # Read manifest lines and fix relative paths
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        data = []
-        for line in f:
-            entry = json.loads(line.strip())
-            if not os.path.isabs(entry["audio_filepath"]):
-                entry["audio_filepath"] = os.path.join(
-                    root_dir, entry["audio_filepath"]
-                )
-            data.append(entry)
-
-    # Create Hugging Face dataset and cast audio column
-    dataset = Dataset.from_list(data)
-    dataset = dataset.add_column(
-        "original_audio_filepath",
-        [x["audio_filepath"].replace(root_dir, "") for x in data],
-    )
-
-    # Cast audio column and rename for processor compatibility
-    dataset = dataset.cast_column("audio_filepath", Audio(sampling_rate=sample_rate))
-    dataset = dataset.rename_column("audio_filepath", "audio")
-
-    print(f"Loaded {len(dataset)} samples.")
-    return dataset
+from utils.dataset_utils import load_asr_manifest_dataset
 
 
 def transcribe_batch(model, base_model_name, processor, audio_batch, device):
@@ -73,7 +43,7 @@ def transcribe_batch(model, base_model_name, processor, audio_batch, device):
 
 def main():
 
-    config = OmegaConf.load("config/eval.yaml")
+    config = OmegaConf.load("config/eval_asr.yaml")
 
     # Load config
     manifest_path = config.manifest
@@ -95,16 +65,16 @@ def main():
     # Check if checkpoint contains LoRA adapter
     adapter_config = os.path.join(config.checkpoint_path, "adapter_config.json")
     if os.path.exists(adapter_config):
-        print(f"🔗 Detected LoRA adapter at {config.checkpoint_path} — loading it...")
+        print(f"Detected LoRA adapter at {config.checkpoint_path} — loading it...")
         model = PeftModel.from_pretrained(base_model, config.checkpoint_path)
     else:
-        print(f"⚠️ No adapter_config.json found — assuming full model checkpoint.")
+        print("No adapter_config.json found — assuming full model checkpoint.")
         model = base_model
 
     model.eval()
 
     # Load dataset
-    dataset = load_manifest_dataset(manifest_path, sample_rate=sample_rate)
+    dataset = load_asr_manifest_dataset(manifest_path, sample_rate=sample_rate)
 
     # Prepare output file
     os.makedirs(os.path.dirname(config.output_path), exist_ok=True)
@@ -115,7 +85,7 @@ def main():
 
     print("Running inference...")
     with open(config.output_path, "a", encoding="utf-8") as f_out:
-        for i, sample in enumerate(tqdm(dataset)):
+        for sample in tqdm(dataset):
             reference = sample["text"].strip()
             audio = sample["audio"]
 
