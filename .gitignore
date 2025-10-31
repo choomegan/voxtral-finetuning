@@ -2,3 +2,4 @@ experiments/
 .venv
 wandb/
 *.json
+__pycache__
