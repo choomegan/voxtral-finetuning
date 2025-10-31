@@ -1,0 +1,4 @@
+model: mistralai/Voxtral-Mini-3B-2507
+checkpoint_path: mistralai/Voxtral-Mini-3B-2507
+manifest: /mnt/d/MEGAN/data/moofoo_s2tt/id/test_manifest.json
+output_path: ./eval_results/3B_pretrained_id_eval.json
