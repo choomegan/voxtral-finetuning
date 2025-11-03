@@ -85,4 +85,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    compute_metrics(args.manifest_path)
+    compute_metrics(args.manifest)
