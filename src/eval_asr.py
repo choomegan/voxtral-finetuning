@@ -15,13 +15,13 @@ from transformers import VoxtralForConditionalGeneration, VoxtralProcessor
 from utils.dataset_utils import load_asr_manifest_dataset
 
 
-def transcribe_batch(model, base_model_name, processor, audio_batch, device):
+def transcribe_batch(model, base_model_name, processor, audio_batch, lang, device):
     """
     Run inference on a batch of audio clips.
     """
     with torch.no_grad():
         inputs = processor.apply_transcription_request(
-            language="en",
+            language=lang,
             audio=audio_batch["array"],
             format=["WAV"],
             model_id=base_model_name,
@@ -86,12 +86,12 @@ def main():
     print("Running inference...")
     with open(config.output_path, "a", encoding="utf-8") as f_out:
         for sample in tqdm(dataset):
-            reference = sample["text"].strip()
+            reference = sample["source"]["text"].strip()
             audio = sample["audio"]
 
             # Run transcription
             prediction = transcribe_batch(
-                model, config.model, processor, audio, device
+                model, config.model, processor, audio, config.lang, device
             )[0].strip()
 
             # Compute WER and CER for this example
