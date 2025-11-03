@@ -104,3 +104,39 @@ def load_st_manifest_dataset(manifest_path: str) -> Dataset:
     print("Columns:", dataset.column_names)
     print(f"Loaded {len(dataset)} samples from {manifest_path}")
     return dataset
+
+
+def load_multitask_manifest_dataset(manifest_path: str, sample_rate: int = 16000):
+    """
+    Loads a manifest that supports both ASR and ST from the same entries.
+    Returns a HuggingFace Dataset with fields ready for multitask batching.
+    """
+    print(f"Loading multi-task dataset from: {manifest_path}")
+    root_dir = os.path.dirname(os.path.abspath(manifest_path))
+
+    data = []
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        for line in f:
+            entry = json.loads(line.strip())
+            audio_path = entry["source"]["audio_local_path"]
+            if not os.path.isabs(audio_path):
+                audio_path = os.path.join(root_dir, audio_path)
+            audio_path = os.path.normpath(audio_path)
+
+            # One entry will later be used for both ASR and ST
+            data.append(
+                {
+                    "audio_filepath": audio_path,  # for ASR, will be overwritten
+                    "audio_local_path": audio_path,  # for ST
+                    "text": entry["source"]["text"],
+                    "source.lang": entry["source"]["lang"],
+                    "target.text": entry["target"]["text"],
+                    "target.lang": entry["target"]["lang"],
+                }
+            )
+
+    dataset = Dataset.from_list(data)
+    dataset = dataset.cast_column("audio_filepath", Audio(sampling_rate=sample_rate))
+    dataset = dataset.rename_column("audio_filepath", "audio")
+    print(f"Loaded {len(dataset)} multi-task samples from {manifest_path}")
+    return dataset

@@ -1,0 +1,36 @@
+model: mistralai/Voxtral-Mini-3B-2507
+device_id: 0
+
+data:
+  train_manifest: /home/pumba-04/Desktop/MEGAN/datasets/MOOFOO_S2TT/ms_id_train_manifest_multitask.json
+  eval_manifest: /home/pumba-04/Desktop/MEGAN/datasets/MOOFOO_S2TT/ms_id_validation_manifest_multitask.json
+
+lora:
+  r: 8
+  alpha: 32
+  dropout: 0.0
+  target_modules: ["q_proj", "k_proj"]
+
+trainer:
+  epochs: 4
+  lr: 5e-5
+  grad_accum: 4
+  train_batch_size: 2
+  eval_batch_size: 2
+  logging_steps: 2
+  save_steps: 1000
+  eval_steps: 1000
+  warmup_steps: 500
+  load_in_4bit: False
+  bf16: True
+  save_total_limit: 2
+  resume_from_checkpoint: null # ckpt folder or null
+
+exp_manager:
+  name: s2tt_asr_multitask
+  exp_dir: experiments
+  logger: wandb # wandb or tensorboard
+  wandb:
+    project: voxtral-finetuning-multitask
+    run_id: null # only used for resuming runs
+  
