@@ -15,7 +15,11 @@ MAX_AUDIO_DURATION_SEC = 30.0
 
 
 def preprocess_asr_dataset(
-    manifest_path: str, processor, model_id: str, sample_rate: int = 16000
+    manifest_path: str,
+    processor,
+    model_id: str,
+    lang: str = "en",
+    sample_rate: int = 16000,
 ):
     """
     Preprocess ASR dataset - tokenize text and process audio features offline.
@@ -76,7 +80,7 @@ def preprocess_asr_dataset(
 
         # Process audio features in batch
         prompt = processor.apply_transcription_request(
-            language="en",
+            language=lang,
             model_id=model_id,
             audio=audios,
             format=["WAV"] * len(audios),

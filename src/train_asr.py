@@ -56,16 +56,17 @@ def main():
     torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {torch_device}")
 
-    print("Loading datasets...")
     #################### Load datasets from manifest files #############################
     print("Loading processor...")
     processor = VoxtralProcessor.from_pretrained(model_checkpoint)
 
+    print("Loading datasets...")
     train_dataset, eval_dataset = load_asr_manifest_dataset(
         train_manifest=config.data.train_manifest,
         eval_manifest=config.data.eval_manifest,
         processor=processor,
         model_id=config.model,
+        lang=config.lang,
     )
 
     # Setup data collator
