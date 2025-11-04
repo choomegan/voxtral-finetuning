@@ -19,88 +19,7 @@ from transformers import (
 )
 
 from utils.dataset_utils import load_st_manifest_dataset
-from utils.chat_template_utils import build_st_prompt
-
-
-class VoxtralSTDataCollator:
-    """Data collator for Voxtral speech translation training."""
-
-    def __init__(self, processor, model_id):
-        self.processor = processor
-        self.model_id = model_id
-        self.tokenizer = processor.tokenizer
-        self.pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-
-    def __call__(self, features: List[Dict[str, Any]]):
-        # 1. Prepare two versions of conversations: Prompt Only and Full Conversation (Prompt + Target)
-        prompts = []
-        full_conversations = []
-
-        for f in features:
-            src_lang = f["source.lang"]
-            audio_path = f["source.audio_local_path"]
-
-            # A. Prompt (User Message Only) - Used to calculate prompt length for masking
-            prompt_messages = build_st_prompt(src_lang, audio_path)
-            prompts.append(prompt_messages)
-
-            # B. Full Conversation (User Message + Target/Assistant Response) - Used for final input_ids and labels
-            full_messages = prompt_messages + [
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": f["target.text"]}],
-                }
-            ]
-            full_conversations.append(full_messages)
-
-        # 2. Tokenize the Prompt Only to determine the masking length
-        # This ends with a USER message, which is usually fine without special flags.
-        prompt_inputs = self.processor.apply_chat_template(
-            prompts,
-            return_tensors="pt",
-            tokenize=True,
-            padding="longest",
-        )
-
-        # Calculate the length of the prompt for each example in the batch
-        prompt_lengths = torch.sum(
-            prompt_inputs["input_ids"] != self.pad_id, dim=1
-        ).tolist()
-
-        # 3. Tokenize the Full Conversation to get the final input_ids and labels
-        # We must add continue_final_message=True here because the conversation
-        # ends with an 'assistant' role, which is typically not allowed for serving
-        model_inputs = self.processor.apply_chat_template(
-            full_conversations,
-            return_tensors="pt",
-            tokenize=True,
-            padding="longest",
-            continue_final_message=True,
-        )
-
-        input_ids = model_inputs["input_ids"]
-        labels = input_ids.clone()  # Labels must have the exact same shape as input_ids
-
-        # 4. Mask the Prompt tokens in the Labels tensor
-        # Iterate over the batch and mask the prompt tokens with -100
-        for i, prompt_len in enumerate(prompt_lengths):
-            # Mask all tokens up to the calculated prompt length
-            labels[i, :prompt_len] = -100
-
-            # Mask padding tokens if they exist (though padding="longest" should handle this)
-            padding_mask = input_ids[i] == self.pad_id
-            labels[i][padding_mask] = -100
-
-        batch = {
-            **model_inputs,
-            "labels": labels,
-        }
-        return batch
-
-
-# ===============================
-#  Main Training
-# ===============================
+from utils.collators import FastSTCollator
 
 
 def main():
@@ -135,17 +54,21 @@ def main():
 
     print(f"Using device: {device}")
 
-    # --- Load datasets ---
-    print("Loading datasets...")
-    train_dataset = load_st_manifest_dataset(config.data.train_manifest)
-    eval_dataset = load_st_manifest_dataset(config.data.eval_manifest)
-
     # --- Load processor ---
     print("Loading processor...")
     processor = VoxtralProcessor.from_pretrained(config.model)
 
+    # --- Load datasets ---
+    print("Loading datasets...")
+    train_dataset, eval_dataset = load_st_manifest_dataset(
+        train_manifest=config.data.train_manifest,
+        eval_manifest=config.data.eval_manifest,
+        processor=processor,
+        model_id=config.model,
+    )
+
     # --- Data collator ---
-    data_collator = VoxtralSTDataCollator(processor, config.model)
+    data_collator = FastSTCollator(processor)
 
     # --- Model & LoRA setup ---
     print("Loading model...")

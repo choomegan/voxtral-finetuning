@@ -2,12 +2,13 @@
 Helper functions for dataset loading
 """
 
-import os
-import json
-from datasets import Audio, Dataset
+from datasets import Dataset
+from utils.preprocess_utils import preprocess_asr_dataset, preprocess_st_dataset
 
 
-def load_asr_manifest_dataset(manifest_path: str, sample_rate: int = 16000) -> Dataset:
+def load_asr_manifest_dataset(
+    train_manifest: str, eval_manifest: str, processor, model_id: str
+) -> Dataset:
     """
     Data loader for ASR
 
@@ -21,42 +22,14 @@ def load_asr_manifest_dataset(manifest_path: str, sample_rate: int = 16000) -> D
       "text": "this is a transcript"
     }
     """
-    print(f"Loading dataset from: {manifest_path}")
-    root_dir = os.path.dirname(os.path.abspath(manifest_path))
-
-    data = []
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        for line in f:
-            entry = json.loads(line.strip())
-
-            # Normalize text
-            entry["text"] = entry["text"].lower().strip()
-
-            # Prepend the manifest's directory if path is relative
-            audio_path = entry["audio_filepath"]
-            if not os.path.isabs(audio_path):
-                audio_path = os.path.join(root_dir, audio_path)
-            entry["audio_filepath"] = os.path.normpath(audio_path)
-            data.append(entry)
-
-    dataset = Dataset.from_list(data)
-
-    # add column to retain original audio_filepath
-    dataset = dataset.add_column(
-        "original_audio_filepath",
-        [x["audio_filepath"].replace(root_dir, "") for x in data],
-    )
-    # Decode audio on the fly
-    dataset = dataset.cast_column("audio_filepath", Audio(sampling_rate=sample_rate))
-
-    # Rename to match collator expectations
-    dataset = dataset.rename_column("audio_filepath", "audio")
-
-    print(f"Loaded {len(dataset)} samples from {manifest_path}")
-    return dataset
+    train_dataset = preprocess_asr_dataset(train_manifest, processor, model_id)
+    eval_dataset = preprocess_asr_dataset(eval_manifest, processor, model_id)
+    return train_dataset, eval_dataset
 
 
-def load_st_manifest_dataset(manifest_path: str) -> Dataset:
+def load_st_manifest_dataset(
+    train_manifest: str, eval_manifest: str, processor, model_id: str
+) -> Dataset:
     """
     Data loader for speech translation
 
@@ -77,66 +50,34 @@ def load_st_manifest_dataset(manifest_path: str) -> Dataset:
             }
     }
     """
-    print(f"Loading dataset from: {manifest_path}")
-    root_dir = os.path.dirname(os.path.abspath(manifest_path))
-    data = []
-
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        for line in f:
-            entry = json.loads(line.strip())
-
-            # Normalize
-            entry["target"]["text"] = entry["target"]["text"].strip()
-
-            # Fix relative audio paths
-            audio_path = entry["source"]["audio_local_path"]
-            if not os.path.isabs(audio_path):
-                audio_path = os.path.join(root_dir, audio_path)
-            entry["source"]["audio_local_path"] = os.path.normpath(audio_path)
-            data.append(entry)
-
-    dataset = Dataset.from_list(data)
-
-    # remove nested structure due to format of manifest file
-    dataset = dataset.flatten()
-
-    # Rename for collator compatibility
-    print("Columns:", dataset.column_names)
-    print(f"Loaded {len(dataset)} samples from {manifest_path}")
-    return dataset
+    train_dataset = preprocess_st_dataset(train_manifest, processor, model_id)
+    eval_dataset = preprocess_st_dataset(eval_manifest, processor, model_id)
+    return train_dataset, eval_dataset
 
 
-def load_multitask_manifest_dataset(manifest_path: str, sample_rate: int = 16000):
+def load_preprocessed_multitask_dataset(
+    train_manifest: str,
+    eval_manifest: str,
+    processor,
+    model_id: str,
+):
     """
-    Loads a manifest that supports both ASR and ST from the same entries.
-    Returns a HuggingFace Dataset with fields ready for multitask batching.
+    Load or create preprocessed datasets for both tasks.
+
+    This caches the preprocessed data to disk so you only pay the cost once.
     """
-    print(f"Loading multi-task dataset from: {manifest_path}")
-    root_dir = os.path.dirname(os.path.abspath(manifest_path))
+    # Load or create train datasets
+    train_asr = preprocess_asr_dataset(train_manifest, processor, model_id)
+    train_st = preprocess_st_dataset(train_manifest, processor, model_id)
 
-    data = []
-    with open(manifest_path, "r", encoding="utf-8") as f:
-        for line in f:
-            entry = json.loads(line.strip())
-            audio_path = entry["source"]["audio_local_path"]
-            if not os.path.isabs(audio_path):
-                audio_path = os.path.join(root_dir, audio_path)
-            audio_path = os.path.normpath(audio_path)
+    # Load or create eval datasets
+    eval_asr = preprocess_asr_dataset(eval_manifest, processor, model_id)
+    eval_st = preprocess_st_dataset(eval_manifest, processor, model_id)
 
-            # One entry will later be used for both ASR and ST
-            data.append(
-                {
-                    "audio_filepath": audio_path,  # for ASR, will be overwritten
-                    "audio_local_path": audio_path,  # for ST
-                    "text": entry["source"]["text"],
-                    "source.lang": entry["source"]["lang"],
-                    "target.text": entry["target"]["text"],
-                    "target.lang": entry["target"]["lang"],
-                }
-            )
+    # Combine and shuffle
+    from datasets import concatenate_datasets
 
-    dataset = Dataset.from_list(data)
-    dataset = dataset.cast_column("audio_filepath", Audio(sampling_rate=sample_rate))
-    dataset = dataset.rename_column("audio_filepath", "audio")
-    print(f"Loaded {len(dataset)} multi-task samples from {manifest_path}")
-    return dataset
+    train_dataset = concatenate_datasets([train_asr, train_st]).shuffle(seed=42)
+    eval_dataset = concatenate_datasets([eval_asr, eval_st]).shuffle(seed=42)
+
+    return train_dataset, eval_dataset

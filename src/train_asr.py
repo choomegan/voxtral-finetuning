@@ -18,97 +18,12 @@ from transformers import (
 )
 
 from utils.dataset_utils import load_asr_manifest_dataset
-
-
-class VoxtralDataCollator:
-    """Data collator for Voxtral STT training - processes audio and text."""
-
-    def __init__(self, processor, model_id):
-        self.processor = processor
-        self.model_id = model_id
-        self.pad_id = processor.tokenizer.pad_token_id
-
-    def __call__(self, features):
-        """
-        Each feature should have:
-          - "audio": raw audio (whatever your processor expects)
-          - "text":  transcription string
-        """
-        texts = [f["text"] for f in features]
-        audios = [f["audio"]["array"] for f in features]
-
-        # 1) Build the PROMPT part: [AUDIO]…[AUDIO] <transcribe>
-        prompt = self.processor.apply_transcription_request(  # (same method you used)
-            language="en",
-            model_id=self.model_id if hasattr(self, "model_id") else None,
-            audio=audios,
-            format=["WAV"] * len(audios),
-            return_tensors="pt",
-        )
-        # prompt["input_ids"]: shape [B, L_prompt]
-        # keep any extra fields (e.g., audio features) to pass through to the model
-        passthrough = {
-            k: v for k, v in prompt.items() if k not in ("input_ids", "attention_mask")
-        }
-
-        prompt_ids = prompt["input_ids"]  # [B, Lp]
-        prompt_attn = prompt["attention_mask"]  # [B, Lp]
-        B = prompt_ids.size(0)
-
-        tok = self.processor.tokenizer
-        # 2) Tokenize transcriptions WITHOUT padding; we'll pad after concatenation
-        text_tok = tok(
-            texts,
-            add_special_tokens=False,
-            padding=False,
-            truncation=True,
-            max_length=256,
-            return_tensors=None,
-        )
-        text_ids_list = text_tok["input_ids"]
-
-        # 3) Concatenate: input_ids = [PROMPT] + [TEXT]
-        input_ids, attention_mask, labels = [], [], []
-        for i in range(B):
-            p_ids = prompt_ids[i].tolist()
-            p_att = prompt_attn[i].tolist()
-            t_ids = text_ids_list[i]
-
-            ids = p_ids + t_ids + [tok.eos_token_id]
-            attn = p_att + [1] * (len(t_ids) + 1)
-            # labels: mask prompt tokens, learn only on text tokens
-            lab = [-100] * len(p_ids) + t_ids + [tok.eos_token_id]
-
-            input_ids.append(ids)
-            attention_mask.append(attn)
-            labels.append(lab)
-
-        # 4) Pad to max length in batch
-        pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
-        max_len = max(len(x) for x in input_ids)
-
-        def pad_to(seq, fill, L):
-            return seq + [fill] * (L - len(seq))
-
-        input_ids = [pad_to(x, pad_id, max_len) for x in input_ids]
-        attention_mask = [pad_to(x, 0, max_len) for x in attention_mask]
-        labels = [pad_to(x, -100, max_len) for x in labels]
-
-        batch = {
-            "input_ids": torch.tensor(input_ids, dtype=torch.long),
-            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
-            "labels": torch.tensor(labels, dtype=torch.long),
-        }
-        # 5) Include processor outputs needed by the model (e.g., audio features)
-        for k, v in passthrough.items():
-            batch[k] = v
-
-        return batch
+from utils.collators import FastASRCollator
 
 
 def main():
     # Load training config
-    config = OmegaConf.load("config/train.yaml")
+    config = OmegaConf.load("config/train_asr.yaml")
 
     if config.exp_manager.logger == "wandb":
         if config.trainer.resume_from_checkpoint and config.exp_manager.wandb.run_id:
@@ -143,14 +58,18 @@ def main():
 
     print("Loading datasets...")
     #################### Load datasets from manifest files #############################
-    train_dataset = load_asr_manifest_dataset(config.data.train_manifest)
-    eval_dataset = load_asr_manifest_dataset(config.data.eval_manifest)
-
     print("Loading processor...")
     processor = VoxtralProcessor.from_pretrained(model_checkpoint)
 
+    train_dataset, eval_dataset = load_asr_manifest_dataset(
+        train_manifest=config.data.train_manifest,
+        eval_manifest=config.data.eval_manifest,
+        processor=processor,
+        model_id=config.model,
+    )
+
     # Setup data collator
-    data_collator = VoxtralDataCollator(processor, model_checkpoint)
+    data_collator = FastASRCollator(processor)
 
     ########################### Load processor and model ###############################
     print("Loading model...")
