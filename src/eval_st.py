@@ -12,7 +12,7 @@ from peft import PeftModel
 from tqdm import tqdm
 from transformers import VoxtralForConditionalGeneration, VoxtralProcessor
 
-from utils.dataset_utils import load_st_manifest_dataset
+from utils.dataset_utils import load_eval_st_manifest_dataset
 from utils.chat_template_utils import build_st_prompt
 
 
@@ -109,7 +109,7 @@ def main():
     model.eval()
 
     # Load dataset. Note: The dataset now contains the 'audio_path' column.
-    dataset = load_st_manifest_dataset(config.manifest)
+    dataset = load_eval_st_manifest_dataset(config.manifest)
 
     # Prepare output files
     os.makedirs(os.path.dirname(config.output_path), exist_ok=True)

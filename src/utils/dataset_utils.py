@@ -2,12 +2,18 @@
 Helper functions for dataset loading
 """
 
-from datasets import Dataset
+import json
+import os
+from datasets import Audio, Dataset
 from utils.preprocess_utils import preprocess_asr_dataset, preprocess_st_dataset
 
 
 def load_asr_manifest_dataset(
-    train_manifest: str, eval_manifest: str, processor, model_id: str
+    eval_manifest: str,
+    processor,
+    model_id: str,
+    train_manifest: str = None,
+    lang: str = "en",
 ) -> Dataset:
     """
     Data loader for ASR
@@ -22,9 +28,15 @@ def load_asr_manifest_dataset(
       "text": "this is a transcript"
     }
     """
-    train_dataset = preprocess_asr_dataset(train_manifest, processor, model_id)
-    eval_dataset = preprocess_asr_dataset(eval_manifest, processor, model_id)
-    return train_dataset, eval_dataset
+    eval_dataset = preprocess_asr_dataset(eval_manifest, processor, model_id, lang)
+
+    if train_manifest:
+        train_dataset = preprocess_asr_dataset(
+            train_manifest, processor, model_id, lang
+        )
+        return train_dataset, eval_dataset
+
+    return eval_dataset
 
 
 def load_st_manifest_dataset(
@@ -81,3 +93,104 @@ def load_preprocessed_multitask_dataset(
     eval_dataset = concatenate_datasets([eval_asr, eval_st]).shuffle(seed=42)
 
     return train_dataset, eval_dataset
+
+
+def load_eval_asr_manifest_dataset(
+    manifest_path: str, sample_rate: int = 16000
+) -> Dataset:
+    """
+    Data loader for ASR
+
+    Load dataset from a JSON manifest file and make audio filepaths absolute.
+    Each line should have:
+    {
+      "audio_filepath": "audio/audio_1.wav",
+      "duration": 5.038,
+      "start": 1166.599,
+      "end": 1171.637,
+      "text": "this is a transcript"
+    }
+    """
+    print(f"Loading dataset from: {manifest_path}")
+    root_dir = os.path.dirname(os.path.abspath(manifest_path))
+
+    data = []
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        for line in f:
+            entry = json.loads(line.strip())
+
+            # Normalize text
+            entry["text"] = entry["text"].lower().strip()
+
+            # Prepend the manifest's directory if path is relative
+            audio_path = entry["audio_filepath"]
+            if not os.path.isabs(audio_path):
+                audio_path = os.path.join(root_dir, audio_path)
+            entry["audio_filepath"] = os.path.normpath(audio_path)
+            data.append(entry)
+
+    dataset = Dataset.from_list(data)
+
+    # add column to retain original audio_filepath
+    dataset = dataset.add_column(
+        "original_audio_filepath",
+        [x["audio_filepath"].replace(root_dir, "") for x in data],
+    )
+    # Decode audio on the fly
+    dataset = dataset.cast_column("audio_filepath", Audio(sampling_rate=sample_rate))
+
+    # Rename to match collator expectations
+    dataset = dataset.rename_column("audio_filepath", "audio")
+
+    print(f"Loaded {len(dataset)} samples from {manifest_path}")
+    return dataset
+
+
+def load_eval_st_manifest_dataset(manifest_path: str) -> Dataset:
+    """
+    Data loader for speech translation
+
+    Load dataset from a JSON manifest file and make audio filepaths absolute.
+    Each line should have:
+    {
+        "source":
+            {
+                "text": "CEO LTAT",
+                "lang": "zsm",
+                "audio_local_path": "audio/TeF4KD586kk-254.wav",
+                "sampling_rate": 16000
+            },
+        "target":
+            {
+                "text": "the CEO of LTAT.",
+                "lang": "eng"}
+            }
+    }
+    """
+    print(f"Loading dataset from: {manifest_path}")
+    root_dir = os.path.dirname(os.path.abspath(manifest_path))
+    data = []
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        for line in f:
+            entry = json.loads(line.strip())
+
+            # Normalize
+            entry["target"]["text"] = entry["target"]["text"].strip()
+
+            # Fix relative audio paths
+            audio_path = entry["source"]["audio_local_path"]
+            if not os.path.isabs(audio_path):
+                audio_path = os.path.join(root_dir, audio_path)
+            entry["source"]["audio_local_path"] = os.path.normpath(audio_path)
+            data.append(entry)
+
+    dataset = Dataset.from_list(data)
+
+    # remove nested structure due to format of manifest file
+    dataset = dataset.flatten()
+
+    # Rename for collator compatibility
+    print("Columns:", dataset.column_names)
+    print(f"Loaded {len(dataset)} samples from {manifest_path}")
+    return dataset

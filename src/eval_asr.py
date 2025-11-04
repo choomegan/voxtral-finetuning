@@ -12,7 +12,7 @@ from peft import PeftModel
 from tqdm import tqdm
 from transformers import VoxtralForConditionalGeneration, VoxtralProcessor
 
-from utils.dataset_utils import load_asr_manifest_dataset
+from utils.dataset_utils import load_eval_asr_manifest_dataset
 
 
 def transcribe_batch(model, base_model_name, processor, audio_batch, lang, device):
@@ -74,7 +74,7 @@ def main():
     model.eval()
 
     # Load dataset
-    dataset = load_asr_manifest_dataset(manifest_path, sample_rate=sample_rate)
+    dataset = load_eval_asr_manifest_dataset(manifest_path, sample_rate=sample_rate)
 
     # Prepare output file
     os.makedirs(os.path.dirname(config.output_path), exist_ok=True)
@@ -86,7 +86,7 @@ def main():
     print("Running inference...")
     with open(config.output_path, "a", encoding="utf-8") as f_out:
         for sample in tqdm(dataset):
-            reference = sample["source"]["text"].strip()
+            reference = sample["text"].strip()
             audio = sample["audio"]
 
             # Run transcription
