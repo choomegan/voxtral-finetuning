@@ -4,7 +4,6 @@ Training script for speech translation task
 
 import os
 from datetime import datetime
-from typing import Any, Dict, List
 
 import torch
 import wandb
@@ -19,7 +18,7 @@ from transformers import (
 )
 
 from utils.dataset_utils import load_st_manifest_dataset
-from utils.collators import FastSTCollator
+from utils.collators import StreamingSTCollator
 
 
 def main():
@@ -63,12 +62,10 @@ def main():
     train_dataset, eval_dataset = load_st_manifest_dataset(
         train_manifest=config.data.train_manifest,
         eval_manifest=config.data.eval_manifest,
-        processor=processor,
-        model_id=config.model,
     )
 
     # --- Data collator ---
-    data_collator = FastSTCollator(processor)
+    data_collator = StreamingSTCollator(processor, model_id=config.model)
 
     # --- Model & LoRA setup ---
     print("Loading model...")

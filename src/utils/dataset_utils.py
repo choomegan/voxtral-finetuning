@@ -10,10 +10,7 @@ from utils.preprocess_utils import preprocess_asr_dataset, preprocess_st_dataset
 
 def load_asr_manifest_dataset(
     eval_manifest: str,
-    processor,
-    model_id: str,
     train_manifest: str = None,
-    lang: str = "en",
 ) -> Dataset:
     """
     Data loader for ASR
@@ -28,20 +25,16 @@ def load_asr_manifest_dataset(
       "text": "this is a transcript"
     }
     """
-    eval_dataset = preprocess_asr_dataset(eval_manifest, processor, model_id, lang)
+    eval_dataset = preprocess_asr_dataset(eval_manifest)
 
     if train_manifest:
-        train_dataset = preprocess_asr_dataset(
-            train_manifest, processor, model_id, lang
-        )
+        train_dataset = preprocess_asr_dataset(train_manifest)
         return train_dataset, eval_dataset
 
     return eval_dataset
 
 
-def load_st_manifest_dataset(
-    train_manifest: str, eval_manifest: str, processor, model_id: str
-) -> Dataset:
+def load_st_manifest_dataset(train_manifest: str, eval_manifest: str) -> Dataset:
     """
     Data loader for speech translation
 
@@ -62,35 +55,42 @@ def load_st_manifest_dataset(
             }
     }
     """
-    train_dataset = preprocess_st_dataset(train_manifest, processor, model_id)
-    eval_dataset = preprocess_st_dataset(eval_manifest, processor, model_id)
+    train_dataset = preprocess_st_dataset(train_manifest)
+    eval_dataset = preprocess_st_dataset(eval_manifest)
     return train_dataset, eval_dataset
 
 
 def load_preprocessed_multitask_dataset(
     train_manifest: str,
     eval_manifest: str,
-    processor,
-    model_id: str,
 ):
     """
     Load or create preprocessed datasets for both tasks.
-
-    This caches the preprocessed data to disk so you only pay the cost once.
+    Uses datasets' automatic caching - memory mapped and cached to disk automatically.
     """
-    # Load or create train datasets
-    train_asr = preprocess_asr_dataset(train_manifest, processor, model_id)
-    train_st = preprocess_st_dataset(train_manifest, processor, model_id)
-
-    # Load or create eval datasets
-    eval_asr = preprocess_asr_dataset(eval_manifest, processor, model_id)
-    eval_st = preprocess_st_dataset(eval_manifest, processor, model_id)
-
-    # Combine and shuffle
     from datasets import concatenate_datasets
 
+    print("Loading/preprocessing training datasets...")
+    train_asr = preprocess_asr_dataset(
+        train_manifest,
+    )
+    train_st = preprocess_st_dataset(
+        train_manifest,
+    )
+
+    print("Loading/preprocessing evaluation datasets...")
+    eval_asr = preprocess_asr_dataset(eval_manifest)
+    eval_st = preprocess_st_dataset(
+        eval_manifest,
+    )
+
+    # Combine and shuffle
+    # Note: This creates a concatenated view, doesn't duplicate data
     train_dataset = concatenate_datasets([train_asr, train_st]).shuffle(seed=42)
     eval_dataset = concatenate_datasets([eval_asr, eval_st]).shuffle(seed=42)
+
+    print(f"Total training samples: {len(train_dataset)}")
+    print(f"Total eval samples: {len(eval_dataset)}")
 
     return train_dataset, eval_dataset
 

@@ -18,7 +18,7 @@ from transformers import (
 )
 
 from utils.dataset_utils import load_asr_manifest_dataset
-from utils.collators import FastASRCollator
+from utils.collators import StreamingASRCollator
 
 
 def main():
@@ -70,7 +70,9 @@ def main():
     )
 
     # Setup data collator
-    data_collator = FastASRCollator(processor)
+    data_collator = StreamingASRCollator(
+        processor, model_id=config.model, lang=config.lang
+    )
 
     ########################### Load processor and model ###############################
     print("Loading model...")

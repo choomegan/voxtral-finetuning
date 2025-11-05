@@ -16,7 +16,11 @@ from transformers import (
     VoxtralProcessor,
 )
 from utils.dataset_utils import load_preprocessed_multitask_dataset
-from utils.collators import FastASRCollator, FastSTCollator, FastMultiTaskCollator
+from utils.collators import (
+    StreamingASRCollator,
+    StreamingMultiTaskCollator,
+    StreamingSTCollator,
+)
 
 
 def main():
@@ -45,14 +49,12 @@ def main():
     train_dataset, eval_dataset = load_preprocessed_multitask_dataset(
         train_manifest=config.data.train_manifest,
         eval_manifest=config.data.eval_manifest,
-        processor=processor,
-        model_id=config.model,
     )
 
     # --- Collators ---
-    asr_collator = FastASRCollator(processor)
-    st_collator = FastSTCollator(processor)
-    multi_collator = FastMultiTaskCollator(asr_collator, st_collator)
+    asr_collator = StreamingASRCollator(processor, model_id=config.model)
+    st_collator = StreamingSTCollator(processor, model_id=config.model)
+    multi_collator = StreamingMultiTaskCollator(asr_collator, st_collator)
 
     # --- Model ---
     print("Loading model...")
