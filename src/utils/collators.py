@@ -152,12 +152,20 @@ class StreamingSTCollator:
         self.pad_id = (
             processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id
         )
+        #  Find the [/INST] token ID (marks end of instruction, start of response)
+        self.inst_end_token_id = 4
+        print(f"Using [/INST] token ID: {self.inst_end_token_id}")
+
+        # Verify it decodes correctly
+        decoded = self.tokenizer.decode([self.inst_end_token_id])
+        print(f"Token {self.inst_end_token_id} decodes to: '{decoded}'")
 
     def __call__(self, batch):
         if not batch:
             return {}
 
-        data = []
+        # Collect all prompts and conversations
+        full_conversations = []
 
         for entry in batch:
             audio_path = entry["audio_path"]
@@ -174,60 +182,44 @@ class StreamingSTCollator:
                     "content": [{"type": "text", "text": tgt_text}],
                 }
             ]
+            full_conversations.append(full_messages)
 
-            # Tokenize prompt
-            prompt_tokens = self.processor.apply_chat_template(
-                [prompt_messages],
-                return_tensors="pt",
-                tokenize=True,
-                padding=False,
-            )
-
-            # Tokenize full conversation
-            full_tokens = self.processor.apply_chat_template(
-                [full_messages],
-                return_tensors="pt",
-                tokenize=True,
-                padding=False,
-                continue_final_message=True,
-            )
-
-            # Get 1D tensors
-            prompt_input_ids = prompt_tokens["input_ids"].squeeze(0)
-            prompt_attn = prompt_tokens["attention_mask"].squeeze(0)
-            full_input_ids = full_tokens["input_ids"].squeeze(0)
-            full_attn = full_tokens["attention_mask"].squeeze(0)
-
-            # Calculate prompt length
-            prompt_len = (prompt_attn != 0).sum().item()
-
-            # Create labels (same length as input_ids)
-            labels = full_input_ids.clone()
-            labels[:prompt_len] = -100  # Mask prompt
-
-            data.append(
-                {
-                    "input_ids": full_input_ids,
-                    "attention_mask": full_attn,
-                    "labels": labels,
-                }
-            )
-
-        # Pad all sequences to same length
-        input_ids = torch.nn.utils.rnn.pad_sequence(
-            [d["input_ids"] for d in data], batch_first=True, padding_value=self.pad_id
+        # ✅ Process only ONCE
+        model_inputs = self.processor.apply_chat_template(
+            full_conversations,
+            return_tensors="pt",
+            tokenize=True,
+            padding="longest",
+            continue_final_message=True,
         )
-        attention_mask = torch.nn.utils.rnn.pad_sequence(
-            [d["attention_mask"] for d in data], batch_first=True, padding_value=0
-        )
-        labels = torch.nn.utils.rnn.pad_sequence(
-            [d["labels"] for d in data], batch_first=True, padding_value=-100
-        )
+
+        input_ids = model_inputs["input_ids"]
+        labels = input_ids.clone()
+
+        # ✅ Find [/INST] token to determine where assistant response starts
+        for i in range(input_ids.size(0)):
+            # Find position of [/INST] token
+            inst_end_positions = (input_ids[i] == self.inst_end_token_id).nonzero(
+                as_tuple=True
+            )[0]
+
+            if len(inst_end_positions) > 0:
+                # Mask everything up to and including [/INST]
+                prompt_len = inst_end_positions[0].item() + 1
+                labels[i, :prompt_len] = -100
+            else:
+                # Fallback: if [/INST] not found, mask everything (shouldn't happen)
+                print(f"Warning: [/INST] token not found in sample {i}")
+                labels[i, :] = -100
+
+            # Mask padding
+            labels[i][input_ids[i] == self.pad_id] = -100
 
         return {
             "input_ids": input_ids,
-            "attention_mask": attention_mask,
+            "attention_mask": model_inputs["attention_mask"],
             "labels": labels,
+            "input_features": model_inputs.get("input_features"),
         }
 
 
