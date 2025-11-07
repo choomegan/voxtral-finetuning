@@ -10,6 +10,7 @@ import soundfile as sf
 import librosa
 
 from utils.chat_template_utils import build_st_prompt
+from concurrent.futures import ThreadPoolExecutor
 
 LANGCODE_MAP = {  # from 3-letter ISO code to 2-letter code
     "en": "en",
@@ -23,7 +24,9 @@ class StreamingASRCollator:
     Fixed ASR collator that creates labels aligned with input_ids.
     """
 
-    def __init__(self, processor, model_id, sample_rate=16000, lang=None):
+    def __init__(
+        self, processor, model_id, sample_rate=16000, lang=None, num_workers=4
+    ):
         self.processor = processor
         self.tokenizer = self.processor.tokenizer
         self.model_id = model_id
@@ -31,6 +34,14 @@ class StreamingASRCollator:
         self.lang = lang
         self.pad_id = self.tokenizer.pad_token_id
         self.eos_id = self.tokenizer.eos_token_id
+        self.num_workers = num_workers
+
+    def _load_and_resample(self, audio_path):
+        """Load and resample a single audio file."""
+        audio, sr = sf.read(audio_path)
+        if sr != self.sample_rate:
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
+        return audio
 
     def __call__(self, features):
         if not features:
@@ -45,12 +56,9 @@ class StreamingASRCollator:
             source_langs = None
 
         # Load and resample audio
-        audios = []
-        for p in audio_paths:
-            audio, sr = sf.read(p)
-            if sr != self.sample_rate:
-                audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
-            audios.append(audio)
+        # ✅ Parallel audio loading
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            audios = list(executor.map(self._load_and_resample, audio_paths))
 
         # Get prompt tokens + audio features
         prompt = self.processor.apply_transcription_request(
