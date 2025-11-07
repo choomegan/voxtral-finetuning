@@ -148,6 +148,8 @@ class StreamingSTCollator:
     def __init__(self, processor, model_id: str, max_length: int = 512):
         self.processor = processor
         self.model_id = model_id
+        self.tokenizer = processor.tokenizer
+
         self.max_length = max_length
         self.pad_id = (
             processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id
@@ -255,28 +257,17 @@ class StreamingMultiTaskCollator:
         return self._merge_batches(asr_batch, st_batch)
 
     def _merge_batches(self, asr_batch: Dict, st_batch: Dict) -> Dict:
-        """
-        Merge ASR + ST batches.
-        Now both have input_ids.shape == labels.shape, so this works correctly.
-        """
-        B_asr = asr_batch["input_ids"].size(0)
-        B_st = st_batch["input_ids"].size(0)
-
-        # Find max sequence length
         max_seq_len = max(asr_batch["input_ids"].size(1), st_batch["input_ids"].size(1))
 
         def pad_and_cat(key, fill_value):
-            """Pad both tensors to max_seq_len and concatenate."""
             asr_tensor = asr_batch[key]
             st_tensor = st_batch[key]
 
-            # Pad ASR
             if asr_tensor.size(1) < max_seq_len:
                 asr_tensor = torch.nn.functional.pad(
                     asr_tensor, (0, max_seq_len - asr_tensor.size(1)), value=fill_value
                 )
 
-            # Pad ST
             if st_tensor.size(1) < max_seq_len:
                 st_tensor = torch.nn.functional.pad(
                     st_tensor, (0, max_seq_len - st_tensor.size(1)), value=fill_value
@@ -284,31 +275,30 @@ class StreamingMultiTaskCollator:
 
             return torch.cat([asr_tensor, st_tensor], dim=0)
 
-        # Merge token tensors
         merged_batch = {
             "input_ids": pad_and_cat("input_ids", self.pad_id),
             "attention_mask": pad_and_cat("attention_mask", 0),
             "labels": pad_and_cat("labels", -100),
         }
 
-        # Handle audio features
-        if "input_features" in asr_batch and asr_batch["input_features"] is not None:
+        # Both batches have input_features -> just concat
+        if "input_features" in asr_batch and "input_features" in st_batch:
             asr_audio = asr_batch["input_features"]
+            st_audio = st_batch["input_features"]
 
-            # Create zero padding for ST samples
-            st_audio_padding = torch.zeros(
-                (B_st, *asr_audio.shape[1:]),
-                dtype=asr_audio.dtype,
-                device=asr_audio.device,
-            )
+            # Verify shapes match (they should, since same model processes both)
+            if asr_audio.shape[1:] != st_audio.shape[1:]:
+                raise ValueError(
+                    f"Audio feature shape mismatch! "
+                    f"ASR: {asr_audio.shape}, ST: {st_audio.shape}"
+                )
 
-            merged_batch["input_features"] = torch.cat(
-                [asr_audio, st_audio_padding], dim=0
-            )
+            # Simply concatenate real audio features
+            merged_batch["input_features"] = torch.cat([asr_audio, st_audio], dim=0)
 
-        # Debug: Verify shapes match
-        assert (
-            merged_batch["input_ids"].shape == merged_batch["labels"].shape
-        ), f"Shape mismatch: input_ids {merged_batch['input_ids'].shape} vs labels {merged_batch['labels'].shape}"
+        elif "input_features" in asr_batch:
+            merged_batch["input_features"] = asr_batch["input_features"]
+        elif "input_features" in st_batch:
+            merged_batch["input_features"] = st_batch["input_features"]
 
         return merged_batch
