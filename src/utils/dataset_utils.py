@@ -5,7 +5,10 @@ Helper functions for dataset loading
 import json
 import os
 from datasets import Audio, Dataset
-from utils.preprocess_utils import preprocess_asr_dataset, preprocess_st_dataset
+from utils.preprocess_utils import (
+    preprocess_asr_dataset,
+    preprocess_st_dataset,
+)
 
 
 def load_asr_manifest_dataset(
@@ -68,7 +71,7 @@ def load_preprocessed_multitask_dataset(
     Load or create preprocessed datasets for both tasks.
     Uses datasets' automatic caching - memory mapped and cached to disk automatically.
     """
-    from datasets import concatenate_datasets
+    from datasets import interleave_datasets
 
     print("Loading/preprocessing training datasets...")
     train_asr = preprocess_asr_dataset(
@@ -86,13 +89,19 @@ def load_preprocessed_multitask_dataset(
 
     # Combine and shuffle
     # Note: This creates a concatenated view, doesn't duplicate data
-    train_dataset = concatenate_datasets([train_asr, train_st]).shuffle(seed=42)
-    eval_dataset = concatenate_datasets([eval_asr, eval_st]).shuffle(seed=42)
+    train_dataset = interleave_datasets(
+        [train_asr, train_st],
+        probabilities=[0.5, 0.5],
+        seed=42,
+        stopping_strategy="all_exhausted",
+    )
+
+    # eval_dataset = concatenate_datasets([eval_asr, eval_st]).shuffle(seed=42)
 
     print(f"Total training samples: {len(train_dataset)}")
-    print(f"Total eval samples: {len(eval_dataset)}")
+    # print(f"Total eval samples: {len(eval_dataset)}")
 
-    return train_dataset, eval_dataset
+    return train_dataset, eval_asr, eval_st
 
 
 def load_eval_asr_manifest_dataset(
