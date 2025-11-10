@@ -19,9 +19,30 @@ LANGCODE_MAP = {  # from 3-letter ISO code to 2-letter code
 }
 
 
+def validate_batch_alignment(batch_dict, expected_batch_size, context=""):
+    """
+    Validate that all tensors in a batch have matching batch dimensions.
+    Returns True if valid, False if invalid.
+    """
+    for key, value in batch_dict.items():
+        if not isinstance(value, torch.Tensor):
+            continue
+
+        actual_batch = value.size(0)
+        if actual_batch != expected_batch_size:
+            print(f"\n❌ Batch alignment error in {context}:")
+            print(
+                f"   {key}: expected {expected_batch_size}, got {actual_batch} (shape: {value.shape})"
+            )
+            return False
+
+    return True
+
+
 class StreamingASRCollator:
     """
     Fixed ASR collator that creates labels aligned with input_ids.
+    Skips entire batch on any alignment issues.
     """
 
     def __init__(
@@ -45,29 +66,43 @@ class StreamingASRCollator:
 
     def __call__(self, features):
         if not features:
-            return {}
+            return None  # Return None instead of {} to signal skip
 
         # Collect paths and texts
         audio_paths = [f["audio_path"] for f in features]
         texts = [f["text"] for f in features]
-        if not self.lang:  # assume that language is provied in the per-row manifest
+        if not self.lang:  # assume that language is provided in the per-row manifest
             source_langs = [LANGCODE_MAP[f["source_lang"]] for f in features]
         else:
             source_langs = None
 
-        # Load and resample audio
-        # ✅ Parallel audio loading
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            audios = list(executor.map(self._load_and_resample, audio_paths))
+        expected_batch_size = len(features)
 
-        # Get prompt tokens + audio features
-        prompt = self.processor.apply_transcription_request(
-            language=self.lang if self.lang else source_langs,
-            model_id=self.model_id,
-            audio=audios,
-            format=["WAV"] * len(audios),
-            return_tensors="pt",
-        )
+        try:
+            # Load and resample audio
+            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+                audios = list(executor.map(self._load_and_resample, audio_paths))
+
+            # Get prompt tokens + audio features
+            prompt = self.processor.apply_transcription_request(
+                language=self.lang if self.lang else source_langs,
+                model_id=self.model_id,
+                audio=audios,
+                format=["WAV"] * len(audios),
+                return_tensors="pt",
+            )
+
+        except Exception as e:
+            print(f"\n❌ Error in ASR collator during audio processing: {e}")
+            print(f"⏭️  Skipping entire ASR batch ({expected_batch_size} samples)")
+            return None
+
+        # Validate batch alignment
+        if not validate_batch_alignment(
+            prompt, expected_batch_size, context="ASR features"
+        ):
+            print(f"⏭️  Skipping entire ASR batch ({expected_batch_size} samples)")
+            return None
 
         prompt_ids = prompt["input_ids"]  # [B, prompt_len]
         prompt_attn = prompt["attention_mask"]  # [B, prompt_len]
@@ -142,7 +177,7 @@ class StreamingASRCollator:
 
 class StreamingSTCollator:
     """
-    ST collator - already correct, but cleaned up for consistency.
+    ST collator - skips entire batch on alignment issues.
     """
 
     def __init__(self, processor, model_id: str, max_length: int = 512):
@@ -164,41 +199,56 @@ class StreamingSTCollator:
 
     def __call__(self, batch):
         if not batch:
-            return {}
+            return None  # Return None instead of {}
 
-        # Collect all prompts and conversations
-        full_conversations = []
+        expected_batch_size = len(batch)
 
-        for entry in batch:
-            audio_path = entry["audio_path"]
-            src_lang = entry["source_lang"]
-            tgt_text = entry["target_text"]
+        try:
+            # Collect all prompts and conversations
+            full_conversations = []
 
-            # Build prompt
-            prompt_messages = build_st_prompt(src_lang, audio_path)
+            for entry in batch:
+                audio_path = entry["audio_path"]
+                src_lang = entry["source_lang"]
+                tgt_text = entry["target_text"]
 
-            # Build full conversation
-            full_messages = prompt_messages + [
-                {
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": tgt_text}],
-                }
-            ]
-            full_conversations.append(full_messages)
+                # Build prompt
+                prompt_messages = build_st_prompt(src_lang, audio_path)
 
-        # ✅ Process only ONCE
-        model_inputs = self.processor.apply_chat_template(
-            full_conversations,
-            return_tensors="pt",
-            tokenize=True,
-            padding="longest",
-            continue_final_message=True,
-        )
+                # Build full conversation
+                full_messages = prompt_messages + [
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": tgt_text}],
+                    }
+                ]
+                full_conversations.append(full_messages)
+
+            # Process only ONCE
+            model_inputs = self.processor.apply_chat_template(
+                full_conversations,
+                return_tensors="pt",
+                tokenize=True,
+                padding="longest",
+                continue_final_message=True,
+            )
+
+        except Exception as e:
+            print(f"\n❌ Error in ST collator during processing: {e}")
+            print(f"⏭️  Skipping entire ST batch ({expected_batch_size} samples)")
+            return None
+
+        # Validate batch alignment
+        if not validate_batch_alignment(
+            model_inputs, expected_batch_size, context="ST features"
+        ):
+            print(f"⏭️  Skipping entire ST batch ({expected_batch_size} samples)")
+            return None
 
         input_ids = model_inputs["input_ids"]
         labels = input_ids.clone()
 
-        # ✅ Find [/INST] token to determine where assistant response starts
+        # Find [/INST] token to determine where assistant response starts
         for i in range(input_ids.size(0)):
             # Find position of [/INST] token
             inst_end_positions = (input_ids[i] == self.inst_end_token_id).nonzero(
@@ -228,7 +278,7 @@ class StreamingSTCollator:
 class StreamingMultiTaskCollator:
     """
     Multi-task collator that merges ASR and ST batches.
-    Now both tasks have properly aligned labels.
+    Properly handles None returns from sub-collators.
     """
 
     def __init__(self, asr_collator, st_collator):
@@ -245,16 +295,54 @@ class StreamingMultiTaskCollator:
         asr_batch = self.asr_collator(asr_data) if asr_data else None
         st_batch = self.st_collator(st_data) if st_data else None
 
-        # Handle edge cases
-        if asr_batch is None and st_batch is None:
-            return {}
-        if asr_batch is None:
+        # Check for None (skipped batches)
+        asr_is_valid = (
+            asr_batch is not None
+            and isinstance(asr_batch, dict)
+            and "input_ids" in asr_batch
+            and asr_batch["input_ids"] is not None
+            and asr_batch["input_ids"].numel() > 0
+        )
+
+        st_is_valid = (
+            st_batch is not None
+            and isinstance(st_batch, dict)
+            and "input_ids" in st_batch
+            and st_batch["input_ids"] is not None
+            and st_batch["input_ids"].numel() > 0
+        )
+
+        # Handle cases where one or both batches are invalid
+        if not asr_is_valid and not st_is_valid:
+            print("⏭️  Both ASR and ST batches invalid, skipping entire batch")
+            return None
+
+        if not asr_is_valid:
+            print("⏭️  ASR batch invalid, returning only ST batch")
             return st_batch
-        if st_batch is None:
+
+        if not st_is_valid:
+            print("⏭️  ST batch invalid, returning only ASR batch")
             return asr_batch
 
-        # Merge batches
-        return self._merge_batches(asr_batch, st_batch)
+        # Both batches valid - merge them
+        try:
+            merged = self._merge_batches(asr_batch, st_batch)
+
+            # Final validation of merged batch
+            total_samples = len(asr_data) + len(st_data)
+            if not validate_batch_alignment(
+                merged, total_samples, context="Multi-task merged batch"
+            ):
+                print(f"⏭️  Merged batch validation failed, skipping")
+                return None
+
+            return merged
+
+        except Exception as e:
+            print(f"\n❌ Error merging batches: {e}")
+            print(f"⏭️  Skipping merged batch")
+            return None
 
     def _merge_batches(self, asr_batch: Dict, st_batch: Dict) -> Dict:
         max_seq_len = max(asr_batch["input_ids"].size(1), st_batch["input_ids"].size(1))
