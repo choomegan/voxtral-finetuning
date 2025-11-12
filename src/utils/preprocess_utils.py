@@ -1,6 +1,9 @@
+import logging
 import os
 import json
 from datasets import Dataset
+
+logger = logging.getLogger(__name__)  # module-level logger
 
 
 def preprocess_asr_dataset(manifest_path: str) -> Dataset:
@@ -8,7 +11,7 @@ def preprocess_asr_dataset(manifest_path: str) -> Dataset:
     Lightweight preprocessing for ASR.
     Only normalizes paths and text. No feature extraction or tokenization.
     """
-    print(f"Preparing lightweight ASR dataset from: {manifest_path}")
+    logger.info("Preparing lightweight ASR dataset from: %s", manifest_path)
     root_dir = os.path.dirname(os.path.abspath(manifest_path))
 
     data = []
@@ -37,7 +40,7 @@ def preprocess_st_dataset(manifest_path: str) -> Dataset:
     Lightweight preprocessing for ST.
     Only stores text, language, and audio paths.
     """
-    print(f"Preparing lightweight ST dataset from: {manifest_path}")
+    logger.info("Preparing lightweight ST dataset from: %s", manifest_path)
     root_dir = os.path.dirname(os.path.abspath(manifest_path))
 
     data = []

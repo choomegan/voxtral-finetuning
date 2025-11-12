@@ -3,6 +3,7 @@ Script for dataset collators for different tasks.
 These collators assume that the datasets have already been preprocessed
 """
 
+import logging
 import torch
 from typing import List, Dict, Any
 import numpy as np
@@ -11,6 +12,9 @@ import librosa
 
 from utils.chat_template_utils import build_st_prompt
 from concurrent.futures import ThreadPoolExecutor
+
+logger = logging.getLogger(__name__)  # module-level logger
+
 
 LANGCODE_MAP = {  # from 3-letter ISO code to 2-letter code
     "en": "en",
@@ -30,9 +34,13 @@ def validate_batch_alignment(batch_dict, expected_batch_size, context=""):
 
         actual_batch = value.size(0)
         if actual_batch != expected_batch_size:
-            print(f"\n❌ Batch alignment error in {context}:")
-            print(
-                f"   {key}: expected {expected_batch_size}, got {actual_batch} (shape: {value.shape})"
+            logger.debug("\n❌ Batch alignment error in %s:", context)
+            logger.debug(
+                "   %s: expected %s, got %s (shape: %s)",
+                key,
+                expected_batch_size,
+                actual_batch,
+                value.shape,
             )
             return False
 
@@ -93,15 +101,19 @@ class StreamingASRCollator:
             )
 
         except Exception as e:
-            print(f"\n❌ Error in ASR collator during audio processing: {e}")
-            print(f"⏭️  Skipping entire ASR batch ({expected_batch_size} samples)")
+            logger.debug("\n❌ Error in ASR collator during audio processing: %s", e)
+            logger.debug(
+                "⏭️  Skipping entire ASR batch (%s samples)", expected_batch_size
+            )
             return None
 
         # Validate batch alignment
         if not validate_batch_alignment(
             prompt, expected_batch_size, context="ASR features"
         ):
-            print(f"⏭️  Skipping entire ASR batch ({expected_batch_size} samples)")
+            logger.debug(
+                f"⏭️  Skipping entire ASR batch (%s samples)", expected_batch_size
+            )
             return None
 
         prompt_ids = prompt["input_ids"]  # [B, prompt_len]
@@ -191,11 +203,15 @@ class StreamingSTCollator:
         )
         #  Find the [/INST] token ID (marks end of instruction, start of response)
         self.inst_end_token_id = 4
-        print(f"Using [/INST] token ID: {self.inst_end_token_id}")
+        logger.info("Using [/INST] token ID: %s", self.inst_end_token_id)
 
         # Verify it decodes correctly
         decoded = self.tokenizer.decode([self.inst_end_token_id])
-        print(f"Token {self.inst_end_token_id} decodes to: '{decoded}'")
+        logger.info(
+            "Token %s decodes to: '%s'",
+            self.inst_end_token_id,
+            decoded,
+        )
 
     def __call__(self, batch):
         if not batch:
@@ -234,15 +250,19 @@ class StreamingSTCollator:
             )
 
         except Exception as e:
-            print(f"\n❌ Error in ST collator during processing: {e}")
-            print(f"⏭️  Skipping entire ST batch ({expected_batch_size} samples)")
+            logger.debug("\n❌ Error in ST collator during processing: %s", e)
+            logger.debug(
+                "⏭️  Skipping entire ST batch (%s samples)", expected_batch_size
+            )
             return None
 
         # Validate batch alignment
         if not validate_batch_alignment(
             model_inputs, expected_batch_size, context="ST features"
         ):
-            print(f"⏭️  Skipping entire ST batch ({expected_batch_size} samples)")
+            logger.debug(
+                "⏭️  Skipping entire ST batch (%s samples)", expected_batch_size
+            )
             return None
 
         input_ids = model_inputs["input_ids"]
@@ -261,7 +281,7 @@ class StreamingSTCollator:
                 labels[i, :prompt_len] = -100
             else:
                 # Fallback: if [/INST] not found, mask everything (shouldn't happen)
-                print(f"Warning: [/INST] token not found in sample {i}")
+                logger.error("Warning: [/INST] token not found in sample %s", i)
                 labels[i, :] = -100
 
             # Mask padding
@@ -314,15 +334,13 @@ class StreamingMultiTaskCollator:
 
         # Handle cases where one or both batches are invalid
         if not asr_is_valid and not st_is_valid:
-            print("⏭️  Both ASR and ST batches invalid, skipping entire batch")
+            logger.info("⏭️  Both ASR and ST batches invalid, skipping entire batch")
             return None
 
         if not asr_is_valid:
-            print("⏭️  ASR batch invalid, returning only ST batch")
             return st_batch
 
         if not st_is_valid:
-            print("⏭️  ST batch invalid, returning only ASR batch")
             return asr_batch
 
         # Both batches valid - merge them
@@ -334,14 +352,14 @@ class StreamingMultiTaskCollator:
             if not validate_batch_alignment(
                 merged, total_samples, context="Multi-task merged batch"
             ):
-                print(f"⏭️  Merged batch validation failed, skipping")
+                logger.info("⏭️  Merged batch validation failed, skipping")
                 return None
 
             return merged
 
         except Exception as e:
-            print(f"\n❌ Error merging batches: {e}")
-            print(f"⏭️  Skipping merged batch")
+            logger.info("\n❌ Error merging batches: %s", e)
+            logger.info("⏭️  Skipping merged batch")
             return None
 
     def _merge_batches(self, asr_batch: Dict, st_batch: Dict) -> Dict:

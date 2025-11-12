@@ -2,19 +2,23 @@
 Helper functions for dataset loading
 """
 
+import logging
 import json
 import os
-from datasets import Audio, Dataset
+from typing import Tuple
+from datasets import Audio, Dataset, interleave_datasets
 from utils.preprocess_utils import (
     preprocess_asr_dataset,
     preprocess_st_dataset,
 )
 
+logger = logging.getLogger(__name__)  # module-level logger
+
 
 def load_asr_manifest_dataset(
+    train_manifest: str,
     eval_manifest: str,
-    train_manifest: str = None,
-) -> Dataset:
+) -> Tuple[Dataset, Dataset]:
     """
     Data loader for ASR
 
@@ -29,15 +33,14 @@ def load_asr_manifest_dataset(
     }
     """
     eval_dataset = preprocess_asr_dataset(eval_manifest)
+    train_dataset = preprocess_asr_dataset(train_manifest)
 
-    if train_manifest:
-        train_dataset = preprocess_asr_dataset(train_manifest)
-        return train_dataset, eval_dataset
-
-    return eval_dataset
+    return train_dataset, eval_dataset
 
 
-def load_st_manifest_dataset(train_manifest: str, eval_manifest: str) -> Dataset:
+def load_st_manifest_dataset(
+    train_manifest: str, eval_manifest: str
+) -> Tuple[Dataset, Dataset]:
     """
     Data loader for speech translation
 
@@ -66,14 +69,12 @@ def load_st_manifest_dataset(train_manifest: str, eval_manifest: str) -> Dataset
 def load_preprocessed_multitask_dataset(
     train_manifest: str,
     eval_manifest: str,
-):
+) -> Tuple[Dataset, Dataset, Dataset]:
     """
     Load or create preprocessed datasets for both tasks.
     Uses datasets' automatic caching - memory mapped and cached to disk automatically.
     """
-    from datasets import interleave_datasets
-
-    print("Loading/preprocessing training datasets...")
+    logger.info("Loading/preprocessing training datasets...")
     train_asr = preprocess_asr_dataset(
         train_manifest,
     )
@@ -81,14 +82,13 @@ def load_preprocessed_multitask_dataset(
         train_manifest,
     )
 
-    print("Loading/preprocessing evaluation datasets...")
+    logger.info("Loading/preprocessing evaluation datasets...")
     eval_asr = preprocess_asr_dataset(eval_manifest)
     eval_st = preprocess_st_dataset(
         eval_manifest,
     )
 
-    # Combine and shuffle
-    # Note: This creates a concatenated view, doesn't duplicate data
+    # Interleave dataset with equal probability
     train_dataset = interleave_datasets(
         [train_asr, train_st],
         probabilities=[0.5, 0.5],
@@ -96,10 +96,7 @@ def load_preprocessed_multitask_dataset(
         stopping_strategy="all_exhausted",
     )
 
-    # eval_dataset = concatenate_datasets([eval_asr, eval_st]).shuffle(seed=42)
-
-    print(f"Total training samples: {len(train_dataset)}")
-    # print(f"Total eval samples: {len(eval_dataset)}")
+    logger.info("Total training samples: %s", len(train_dataset))
 
     return train_dataset, eval_asr, eval_st
 
@@ -120,7 +117,7 @@ def load_eval_asr_manifest_dataset(
       "text": "this is a transcript"
     }
     """
-    print(f"Loading dataset from: {manifest_path}")
+    logger.info("Loading dataset from: %s", manifest_path)
     root_dir = os.path.dirname(os.path.abspath(manifest_path))
 
     data = []
@@ -151,7 +148,11 @@ def load_eval_asr_manifest_dataset(
     # Rename to match collator expectations
     dataset = dataset.rename_column("audio_filepath", "audio")
 
-    print(f"Loaded {len(dataset)} samples from {manifest_path}")
+    logger.info(
+        "Loaded %s samples from %s",
+        len(dataset),
+        manifest_path,
+    )
     return dataset
 
 
@@ -176,7 +177,7 @@ def load_eval_st_manifest_dataset(manifest_path: str) -> Dataset:
             }
     }
     """
-    print(f"Loading dataset from: {manifest_path}")
+    logger.info("Loading dataset from: %s", manifest_path)
     root_dir = os.path.dirname(os.path.abspath(manifest_path))
     data = []
 
@@ -200,6 +201,10 @@ def load_eval_st_manifest_dataset(manifest_path: str) -> Dataset:
     dataset = dataset.flatten()
 
     # Rename for collator compatibility
-    print("Columns:", dataset.column_names)
-    print(f"Loaded {len(dataset)} samples from {manifest_path}")
+    logger.info("Columns: %s", dataset.column_names)
+    logger.info(
+        "Loaded %s samples from %s",
+        len(dataset),
+        manifest_path,
+    )
     return dataset
