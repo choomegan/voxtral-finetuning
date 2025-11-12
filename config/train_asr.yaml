@@ -1,4 +1,5 @@
 model: mistralai/Voxtral-Mini-3B-2507
+lang: en # if whole dataset is a single lang, else None (dataset rows should have respective 'lang' fields)
 
 data:
   train_manifest: /mnt/d/MEGAN/data/PORT/mms_set_1/dev_split/dev_manifest_short.json
@@ -19,7 +20,7 @@ trainer:
   logging_steps: 2
   save_steps: 250
   eval_steps: 250
-  warmup_ratio: 0.05
+  warmup_steps: 500
   bf16: False
   save_total_limit: 2
   resume_from_checkpoint: null # ckpt folder or null
