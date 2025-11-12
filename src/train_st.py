@@ -2,6 +2,7 @@
 Training script for speech translation task
 """
 
+import logging
 import os
 from datetime import datetime
 
@@ -11,7 +12,6 @@ from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
 from transformers import (
     BitsAndBytesConfig,
-    Trainer,
     TrainingArguments,
     VoxtralForConditionalGeneration,
     VoxtralProcessor,
@@ -19,6 +19,15 @@ from transformers import (
 
 from utils.dataset_utils import load_st_manifest_dataset
 from utils.collators import StreamingSTCollator
+from utils.train_utils import SafeTrainer
+
+logging.basicConfig(
+    level=logging.INFO,  # or DEBUG for more verbose logs
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+logger = logging.getLogger(__name__)  # module-level logger
 
 
 def main():
@@ -51,14 +60,14 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"Using device: {device}")
+    logger.info("Using device: %s", device)
 
     # --- Load processor ---
-    print("Loading processor...")
+    logger.info("Loading processor...")
     processor = VoxtralProcessor.from_pretrained(config.model)
 
     # --- Load datasets ---
-    print("Loading datasets...")
+    logger.info("Loading datasets...")
     train_dataset, eval_dataset = load_st_manifest_dataset(
         train_manifest=config.data.train_manifest,
         eval_manifest=config.data.eval_manifest,
@@ -68,7 +77,7 @@ def main():
     data_collator = StreamingSTCollator(processor, model_id=config.model)
 
     # --- Model & LoRA setup ---
-    print("Loading model...")
+    logger.info("Loading model...")
 
     if config.trainer.load_in_4bit:
         bnb_config = BitsAndBytesConfig(
@@ -109,7 +118,6 @@ def main():
     model.print_trainable_parameters()
 
     # --- Training args ---
-    warmup_steps = config.trainer.warmup_steps
 
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -118,7 +126,7 @@ def main():
         gradient_accumulation_steps=config.trainer.grad_accum,
         learning_rate=config.trainer.lr,
         num_train_epochs=config.trainer.epochs,
-        warmup_steps=warmup_steps,
+        warmup_steps=config.trainer.warmup_steps,
         bf16=config.trainer.bf16,
         logging_steps=config.trainer.logging_steps,
         eval_steps=config.trainer.eval_steps if eval_dataset else None,
@@ -137,7 +145,7 @@ def main():
     )
 
     # --- Trainer ---
-    trainer = Trainer(
+    trainer = SafeTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -145,9 +153,9 @@ def main():
         data_collator=data_collator,
     )
 
-    print("Starting training...")
+    logger.info("Starting training...")
     trainer.train(resume_from_checkpoint=config.trainer.resume_from_checkpoint)
-    print("Training complete!")
+    logger.info("Training complete!")
 
 
 if __name__ == "__main__":

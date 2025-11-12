@@ -2,6 +2,7 @@
 Training script for ASR task
 """
 
+import logging
 import os
 from datetime import datetime
 
@@ -11,7 +12,6 @@ from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
 from transformers import (
     BitsAndBytesConfig,
-    Trainer,
     TrainingArguments,
     VoxtralForConditionalGeneration,
     VoxtralProcessor,
@@ -19,6 +19,15 @@ from transformers import (
 
 from utils.dataset_utils import load_asr_manifest_dataset
 from utils.collators import StreamingASRCollator
+from utils.train_utils import SafeTrainer
+
+logging.basicConfig(
+    level=logging.INFO,  # or DEBUG for more verbose logs
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+logger = logging.getLogger(__name__)  # module-level logger
 
 
 def main():
@@ -54,19 +63,16 @@ def main():
 
     # Set device
     torch_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {torch_device}")
+    logger.info("Using device: %s", torch_device)
 
     #################### Load datasets from manifest files #############################
-    print("Loading processor...")
+    logger.info("Loading processor...")
     processor = VoxtralProcessor.from_pretrained(model_checkpoint)
 
-    print("Loading datasets...")
+    logger.info("Loading datasets...")
     train_dataset, eval_dataset = load_asr_manifest_dataset(
         train_manifest=config.data.train_manifest,
         eval_manifest=config.data.eval_manifest,
-        processor=processor,
-        model_id=config.model,
-        lang=config.lang,
     )
 
     # Setup data collator
@@ -75,7 +81,7 @@ def main():
     )
 
     ########################### Load processor and model ###############################
-    print("Loading model...")
+    logger.info("Loading model...")
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,  # Quantize model weights to 4-bit
@@ -92,8 +98,8 @@ def main():
         device_map="auto",
     )
 
-    print(type(model.audio_tower))
-    print("audio encoder layers:", len(model.audio_tower.layers))
+    logger.info(type(model.audio_tower))
+    logger.info("audio encoder layers:", len(model.audio_tower.layers))
 
     # Load model with LoRA configuration
     lora_config = LoraConfig(
@@ -125,19 +131,6 @@ def main():
 
     model.print_trainable_parameters()
 
-    steps_per_epoch = (
-        len(train_dataset)
-        // config.trainer.train_batch_size
-        // config.trainer.grad_accum
-    )
-    total_training_steps = steps_per_epoch * config.trainer.epochs
-
-    # Compute warmup steps from ratio
-    # warmup_ratio = config.trainer.warmup_ratio
-    warmup_steps = (
-        config.trainer.warmup_steps
-    )  # int(total_training_steps * warmup_ratio)
-
     # Simple training arguments
     training_args = TrainingArguments(
         output_dir=output_dir,
@@ -146,7 +139,7 @@ def main():
         gradient_accumulation_steps=config.trainer.grad_accum,
         learning_rate=config.trainer.lr,
         num_train_epochs=config.trainer.epochs,
-        warmup_steps=warmup_steps,
+        warmup_steps=config.trainer.warmup_steps,
         bf16=config.trainer.bf16,
         logging_steps=config.trainer.logging_steps,
         eval_steps=config.trainer.eval_steps if eval_dataset else None,
@@ -165,7 +158,7 @@ def main():
     )
 
     # Setup trainer
-    trainer = Trainer(
+    trainer = SafeTrainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
@@ -174,26 +167,27 @@ def main():
     )
 
     # Start training
-    print("Starting training...")
+    logger.info("Starting training...")
     if config.trainer.resume_from_checkpoint is not None:
-        print(
-            f"Resuming training from checkpoint: {config.trainer.resume_from_checkpoint}"
+        logger.info(
+            "Resuming training from checkpoint: %s",
+            config.trainer.resume_from_checkpoint,
         )
         trainer.train(resume_from_checkpoint=config.trainer.resume_from_checkpoint)
     else:
         trainer.train()
 
     # Save model and processor
-    print(f"Saving model to {output_dir}")
+    logger.info("Saving model to %s", output_dir)
     trainer.save_model()
     processor.save_pretrained(output_dir)
 
     # Final evaluation
     if eval_dataset:
         results = trainer.evaluate()
-        print(f"Final evaluation results: {results}")
+        logger.info("Final evaluation results: %s", results)
 
-    print("Training completed successfully!")
+    logger.info("Training completed successfully!")
 
 
 if __name__ == "__main__":
