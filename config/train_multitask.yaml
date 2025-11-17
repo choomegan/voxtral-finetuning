@@ -11,6 +11,10 @@ lora:
   dropout: 0.0
   target_modules: ["q_proj", "k_proj"]
 
+tasks:
+  s2tt:
+    incl_src_lang: False
+
 trainer:
   epochs: 4
   lr: 5e-5

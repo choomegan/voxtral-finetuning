@@ -70,7 +70,7 @@ def main():
 
     # --- Collators ---
     asr_collator = StreamingASRCollator(processor, model_id=config.model)
-    st_collator = StreamingSTCollator(processor, model_id=config.model)
+    st_collator = StreamingSTCollator(processor, model_id=config.model, incl_src_lang=config.tasks.s2tt.incl_src_lang)
     multi_collator = StreamingMultiTaskCollator(asr_collator, st_collator)
 
     # --- Model ---

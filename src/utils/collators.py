@@ -10,7 +10,7 @@ import numpy as np
 import soundfile as sf
 import librosa
 
-from utils.chat_template_utils import build_st_prompt
+from utils.chat_template_utils import build_st_prompt, build_st_prompt_no_src_lang
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)  # module-level logger
@@ -192,10 +192,11 @@ class StreamingSTCollator:
     ST collator - skips entire batch on alignment issues.
     """
 
-    def __init__(self, processor, model_id: str, max_length: int = 512):
+    def __init__(self, processor, model_id: str, incl_src_lang: bool=True, max_length: int = 512):
         self.processor = processor
         self.model_id = model_id
         self.tokenizer = processor.tokenizer
+        self.incl_src_lang = incl_src_lang
 
         self.max_length = max_length
         self.pad_id = (
@@ -229,7 +230,7 @@ class StreamingSTCollator:
                 tgt_text = entry["target_text"]
 
                 # Build prompt
-                prompt_messages = build_st_prompt(src_lang, audio_path)
+                prompt_messages = build_st_prompt(src_lang, audio_path) if self.incl_src_lang else build_st_prompt_no_src_lang(audio_path)
 
                 # Build full conversation
                 full_messages = prompt_messages + [

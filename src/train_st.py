@@ -74,7 +74,7 @@ def main():
     )
 
     # --- Data collator ---
-    data_collator = StreamingSTCollator(processor, model_id=config.model)
+    data_collator = StreamingSTCollator(processor, model_id=config.model, incl_src_lang=config.tasks.s2tt.incl_src_lang)
 
     # --- Model & LoRA setup ---
     logger.info("Loading model...")

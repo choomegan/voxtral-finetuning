@@ -25,3 +25,21 @@ def build_st_prompt(src_lang: str, audio_path: str) -> List[Dict]:
             ],
         },
     ]
+
+def build_st_prompt_no_src_lang(audio_path: str) -> List[Dict]:
+    """
+    Build speech translation chat prompt without source language
+    Translates unknown language -> English
+    """
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "audio", "path": audio_path},
+                {
+                    "type": "text",
+                    "text": "Translate this audio into English text.",
+                },
+            ],
+        },
+    ]
