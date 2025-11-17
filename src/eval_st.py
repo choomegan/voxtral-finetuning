@@ -82,7 +82,7 @@ def main():
     config = OmegaConf.load("config/eval_st.yaml")
 
     # Device Setup
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{int(config.device)}" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
     # Load Model & Processor
