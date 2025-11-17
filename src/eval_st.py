@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 from peft import PeftModel
 from tqdm import tqdm
 from transformers import VoxtralForConditionalGeneration, VoxtralProcessor
+from sacrebleu.metrics import BLEU
 
 from utils.dataset_utils import load_eval_st_manifest_dataset
 from utils.chat_template_utils import build_st_prompt
@@ -118,7 +119,7 @@ def main():
         os.remove(config.output_path)
 
     # Initialize metrics
-    bleu = evaluate.load("bleu")
+    bleu = BLEU(tokenize="spm", effective_order=True)
     all_predictions, all_references = [], []
 
     print(f"Running speech translation inference on {len(dataset)} samples...")
@@ -149,9 +150,8 @@ def main():
             f_out.write("\n")
 
     # --- Corpus-level metrics ---
-    corpus_bleu = bleu.compute(predictions=all_predictions, references=all_references)[
-        "bleu"
-    ]
+    corpus_bleu = bleu.corpus_score(all_predictions, all_references).score
+    
 
     print(f"\n✅ Corpus-level BLEU: {corpus_bleu:.4f}")
 
