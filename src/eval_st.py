@@ -137,7 +137,7 @@ def main():
 
             # Collect results for corpus-level metrics
             all_predictions.append(prediction)
-            all_references.append([reference])
+            all_references.append(reference)
 
             # Write per-sample result
             meta = {k: v for k, v in sample.items()}
