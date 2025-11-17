@@ -25,6 +25,7 @@ trainer:
   save_steps: 1000
   eval_steps: 1000
   warmup_steps: 500
+  eval_on_start: True
   load_in_4bit: False
   bf16: True
   save_total_limit: 2

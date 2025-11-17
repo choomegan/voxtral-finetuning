@@ -124,6 +124,7 @@ def main():
         warmup_steps=config.trainer.warmup_steps,
         bf16=config.trainer.bf16,
         logging_steps=config.trainer.logging_steps,
+        eval_on_start=config.trainer.eval_on_start,
         eval_steps=config.trainer.eval_steps,
         save_steps=config.trainer.save_steps,
         save_strategy="steps",
