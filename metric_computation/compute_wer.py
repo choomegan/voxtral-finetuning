@@ -112,12 +112,10 @@ def main():
         wer, cer, mer = compute_asr_metrics(text, pred_text)
         row["wer"] = wer
         row["cer"] = cer
-        row["mer"] = mer
 
     overall_wer, overall_cer, overall_mer = compute_asr_metrics(references, hypotheses)
     logging.info(f"WER: {overall_wer}")
     logging.info(f"CER: {overall_cer}")
-    logging.info(f"Word Accuracy: {100-overall_mer}")
 
     save_manifest(items=data, save_path=args.output_dir)
 
