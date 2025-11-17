@@ -1,5 +1,6 @@
 model: mistralai/Voxtral-Mini-3B-2507
-checkpoint_path: mistralai/Voxtral-Mini-3B-2507
-lang: ms
-manifest: /home/pumba-04/Desktop/MEGAN/datasets/MOOFOO_S2TT/ms_test_manifest_updated.json
-output_path: ./eval_results/vox_3B_pretrained_asr_ms_test.json
+checkpoint_path: /home/pumba-03/Desktop/megan/models/voxtral_multitask_st_asr_v4/checkpoint-55000
+lang: id
+manifest: /home/pumba-03/Desktop/megan/data/moofoo/id_test_manifest_multitask.json
+output_path: ./eval_results/ASR_3B_pretrained_id_test.json
+device: 0
