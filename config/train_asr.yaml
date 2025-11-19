@@ -17,11 +17,13 @@ trainer:
   grad_accum: 4
   train_batch_size: 2
   eval_batch_size: 4
-  logging_steps: 2
-  save_steps: 250
-  eval_steps: 250
-  warmup_steps: 500
-  bf16: False
+  logging_steps: 10
+  save_steps: 1000
+  eval_steps: 1000
+  eval_on_start: True
+  warmup_steps: 1000
+  load_in_4bit: False
+  bf16: True
   save_total_limit: 2
   resume_from_checkpoint: null # ckpt folder or null
 

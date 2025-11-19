@@ -83,23 +83,26 @@ def main():
     ########################### Load processor and model ###############################
     logger.info("Loading model...")
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,  # Quantize model weights to 4-bit
-        bnb_4bit_use_double_quant=True,  # Secondary quantization for smaller memory footprint
-        bnb_4bit_quant_type="nf4",  # NormalFloat4 – best balance of quality & compression
-        bnb_4bit_compute_dtype=torch.float16,  # A6000 supports bf16 natively
-    )
+    if config.trainer.load_in_4bit:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+        )
 
-    # print number of parameters in model
-    model = VoxtralForConditionalGeneration.from_pretrained(
-        model_checkpoint,
-        torch_dtype=torch.float16,
-        quantization_config=bnb_config,
-        device_map="auto",
-    )
-
-    logger.info(type(model.audio_tower))
-    logger.info("audio encoder layers:", len(model.audio_tower.layers))
+        model = VoxtralForConditionalGeneration.from_pretrained(
+            config.model,
+            torch_dtype=torch.float16,
+            quantization_config=bnb_config,
+            device_map={"": int(config.device_id)},  # single GPU
+        )
+    else:
+        model = VoxtralForConditionalGeneration.from_pretrained(
+            config.model,
+            torch_dtype=torch.bfloat16 if config.trainer.bf16 else torch.float16,
+            device_map={"": int(config.device_id)},  # single GPU
+        )
 
     # Load model with LoRA configuration
     lora_config = LoraConfig(
@@ -120,6 +123,7 @@ def main():
     # Optional - dont train audio encoder
     for param in model.audio_tower.parameters():
         param.requires_grad = False
+
     model = get_peft_model(model, lora_config)
 
     # Enable gradient checkpointing manually instead of via TrainingArguments.
@@ -127,7 +131,6 @@ def main():
     # inputs to lose their requires_grad flag — leading to "tensor does not require grad" errors.
     # Calling these methods directly ensures input gradients are tracked correctly for LoRA layers.
     model.enable_input_require_grads()
-    model.gradient_checkpointing_enable()
 
     model.print_trainable_parameters()
 
@@ -142,6 +145,7 @@ def main():
         warmup_steps=config.trainer.warmup_steps,
         bf16=config.trainer.bf16,
         logging_steps=config.trainer.logging_steps,
+        eval_on_start=config.trainer.eval_on_start,
         eval_steps=config.trainer.eval_steps if eval_dataset else None,
         save_steps=config.trainer.save_steps,
         eval_strategy="steps" if eval_dataset else "no",
