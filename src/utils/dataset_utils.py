@@ -34,6 +34,8 @@ def load_asr_manifest_dataset(
     """
     eval_dataset = preprocess_asr_dataset(eval_manifest)
     train_dataset = preprocess_asr_dataset(train_manifest)
+    logger.info(f"✅ Train dataset size: {len(train_dataset)}")
+    logger.info(f"✅ Eval dataset size: {len(eval_dataset)}")
 
     return train_dataset, eval_dataset
 
@@ -63,6 +65,8 @@ def load_st_manifest_dataset(
     """
     train_dataset = preprocess_st_dataset(train_manifest)
     eval_dataset = preprocess_st_dataset(eval_manifest)
+    logger.info(f"✅ Train dataset size: {len(train_dataset)}")
+    logger.info(f"✅ Eval dataset size: {len(eval_dataset)}")
     return train_dataset, eval_dataset
 
 
