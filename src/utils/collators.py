@@ -12,15 +12,9 @@ import librosa
 
 from utils.chat_template_utils import build_st_prompt, build_st_prompt_no_src_lang
 from concurrent.futures import ThreadPoolExecutor
+from utils.constants import SRCLANG2ID, LANGCODE_MAP
 
 logger = logging.getLogger(__name__)  # module-level logger
-
-
-LANGCODE_MAP = {  # from 3-letter ISO code to 2-letter code
-    "en": "en",
-    "zsm": "ms",
-    "ind": "id",
-}
 
 
 def validate_batch_alignment(batch_dict, expected_batch_size, context=""):
@@ -184,6 +178,9 @@ class StreamingASRCollator:
                     np.stack(batch["input_features"]), dtype=torch.float32
                 )
 
+        batch["source_lang"] = torch.tensor(
+            [SRCLANG2ID[f["source_lang"]] for f in features], dtype=torch.long
+        )
         return batch
 
 
@@ -192,7 +189,13 @@ class StreamingSTCollator:
     ST collator - skips entire batch on alignment issues.
     """
 
-    def __init__(self, processor, model_id: str, incl_src_lang: bool=True, max_length: int = 512):
+    def __init__(
+        self,
+        processor,
+        model_id: str,
+        incl_src_lang: bool = True,
+        max_length: int = 512,
+    ):
         self.processor = processor
         self.model_id = model_id
         self.tokenizer = processor.tokenizer
@@ -230,7 +233,11 @@ class StreamingSTCollator:
                 tgt_text = entry["target_text"]
 
                 # Build prompt
-                prompt_messages = build_st_prompt(src_lang, audio_path) if self.incl_src_lang else build_st_prompt_no_src_lang(audio_path)
+                prompt_messages = (
+                    build_st_prompt(src_lang, audio_path)
+                    if self.incl_src_lang
+                    else build_st_prompt_no_src_lang(audio_path)
+                )
 
                 # Build full conversation
                 full_messages = prompt_messages + [
@@ -293,6 +300,9 @@ class StreamingSTCollator:
             "attention_mask": model_inputs["attention_mask"],
             "labels": labels,
             "input_features": model_inputs.get("input_features"),
+            "source_lang": torch.tensor(
+                [SRCLANG2ID[f["source_lang"]] for f in batch], dtype=torch.long
+            ),
         }
 
 
@@ -408,4 +418,8 @@ class StreamingMultiTaskCollator:
         elif "input_features" in st_batch:
             merged_batch["input_features"] = st_batch["input_features"]
 
+        # Merge source_lang as simple concatenation
+        merged_batch["source_lang"] = torch.cat(
+            [asr_batch["source_lang"], st_batch["source_lang"]], dim=0
+        )
         return merged_batch
