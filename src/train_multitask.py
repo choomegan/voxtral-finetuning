@@ -2,6 +2,7 @@
 Multitask finetuning for ASR and ST
 """
 
+from collections import Counter
 import logging
 import os
 from datetime import datetime
@@ -68,9 +69,31 @@ def main():
         len(eval_dataset_st),
     )
 
+    # --- Compute language weights ---
+    if config.trainer.lang_class_weighting:
+        logger.info(
+            "---------------- Adding language weighting to loss function -------------"
+        )
+        records = train_dataset.to_list()
+        lang_counts = Counter([r["source_lang"] for r in records])
+        logger.info("Language counts: %s", lang_counts)
+
+        total = sum(lang_counts.values())
+        lang_freq = {lang: count / total for lang, count in lang_counts.items()}
+
+        # Inverse frequency
+        lang_weights = {lang: 1.0 / freq for lang, freq in lang_freq.items()}
+
+        # Optional: normalize weights to sum to 1
+        norm_factor = sum(lang_weights.values())
+        lang_weights = {lang: w / norm_factor for lang, w in lang_weights.items()}
+        logger.info("Normalized language weights: %s", lang_weights)
+
     # --- Collators ---
     asr_collator = StreamingASRCollator(processor, model_id=config.model)
-    st_collator = StreamingSTCollator(processor, model_id=config.model, incl_src_lang=config.tasks.s2tt.incl_src_lang)
+    st_collator = StreamingSTCollator(
+        processor, model_id=config.model, incl_src_lang=config.tasks.s2tt.incl_src_lang
+    )
     multi_collator = StreamingMultiTaskCollator(asr_collator, st_collator)
 
     # --- Model ---
@@ -149,6 +172,7 @@ def main():
             "st": eval_dataset_st,
         },
         data_collator=multi_collator,
+        lang_weight_map=lang_weights if config.trainer.lang_class_weighting else None,
     )
 
     logger.info("Starting multi-task training...")
