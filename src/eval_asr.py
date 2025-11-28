@@ -13,6 +13,7 @@ from tqdm import tqdm
 from transformers import VoxtralForConditionalGeneration, VoxtralProcessor
 
 from utils.dataset_utils import load_eval_asr_manifest_dataset
+from utils.constants import LANGCODE_MAP
 
 
 def transcribe_batch(model, base_model_name, processor, audio_batch, lang, device):
@@ -21,7 +22,7 @@ def transcribe_batch(model, base_model_name, processor, audio_batch, lang, devic
     """
     with torch.no_grad():
         inputs = processor.apply_transcription_request(
-            language=lang,
+            language="auto",
             audio=audio_batch["array"],
             format=["WAV"],
             model_id=base_model_name,
@@ -50,7 +51,9 @@ def main():
     sample_rate = 16000
 
     # Device
-    device = torch.device(f"cuda:{int(config.device)}" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        f"cuda:{int(config.device)}" if torch.cuda.is_available() else "cpu"
+    )
     print(f"Using device: {device}")
 
     # Load model & processor
@@ -88,10 +91,14 @@ def main():
         for sample in tqdm(dataset):
             reference = sample["text"].strip()
             audio = sample["audio"]
+            if config.lang:
+                lang = config.lang
+            else:
+                lang = sample["source"]["lang"]
 
             # Run transcription
             prediction = transcribe_batch(
-                model, config.model, processor, audio, config.lang, device
+                model, config.model, processor, audio, LANGCODE_MAP[lang], device
             )[0].strip()
 
             # Compute WER and CER for this example
