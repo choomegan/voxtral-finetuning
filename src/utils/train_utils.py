@@ -112,15 +112,15 @@ class SafeTrainer(Trainer):
         per_token_loss = per_token_loss.view(batch_size, -1)
 
         # Average per sample (only over non-ignored tokens)
-        # Note: CrossEntropyLoss with ignore_index already sets loss=0 for ignored tokens
         valid_mask = (shift_labels != -100).float()
         per_sample_loss = per_token_loss.sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
 
         # Apply language weights
         lang_weight_map_device = self.lang_weight_map.to(source_lang.device)
-        weight_vector = lang_weight_map_device[source_lang]
+        weight_vector = lang_weight_map_device[source_lang]  # [batch_size]
 
-        weighted_loss = (per_sample_loss * weight_vector).mean()
+        # Normalize by sum of weights
+        weighted_loss = (per_sample_loss * weight_vector).sum() / weight_vector.sum()
 
         # Put source_lang back
         inputs["source_lang"] = source_lang
