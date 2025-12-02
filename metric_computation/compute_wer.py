@@ -1,5 +1,6 @@
 """
 Calculate WER, CER, MER overall and per-language for each row in a manifest
+Optionally compute metrics only on verified entries (is_verified == "true").
 """
 
 import json
@@ -62,10 +63,17 @@ def main():
     parser.add_argument("-i", "--manifest_dir", help="input manifest dir")
     parser.add_argument("-o", "--output_dir", help="output dir to save manifest")
     parser.add_argument("-n", "--normalise_text", help="boolean to normalise text")
+    parser.add_argument(
+        "-v",
+        "--verified_only",
+        help="compute overall metrics only on is_verified=='true'",
+        action="store_true",
+    )
 
     args = parser.parse_args()
 
     logging.info("Text normalisation: %s", args.normalise_text)
+    logging.info("Verified only mode: %s", args.verified_only)
 
     # -------------------------------
     # Load manifest
@@ -82,6 +90,12 @@ def main():
     refs_by_lang = defaultdict(list)
     hyps_by_lang = defaultdict(list)
 
+    # For verified-only logic
+    verified_refs = []
+    verified_hyps = []
+    verified_refs_by_lang = defaultdict(list)
+    verified_hyps_by_lang = defaultdict(list)
+
     for row in tqdm.tqdm(data):
         lang = (
             row.get("source", {}).get("lang")
@@ -90,9 +104,10 @@ def main():
             or "unknown"
         )
 
-        # ---------------------------
+        # Check verification
+        is_verified = str(row.get("is_verified", "")).lower() == "true"
+
         # Normalisation (optional)
-        # ---------------------------
         if args.normalise_text:
             pred_text = convert_numbers_to_words(row["prediction"])
             text = normalise(row["source"]["text"])
@@ -103,29 +118,38 @@ def main():
             text = row["text"]
             pred_text = row["pred_text"]
 
-        references.append(text)
-        hypotheses.append(pred_text)
-
-        # Track by language
-        refs_by_lang[lang].append(text)
-        hyps_by_lang[lang].append(pred_text)
-
-        # Compute per-row metrics
+        # Always compute row-level metrics
         wer, cer, mer = compute_asr_metrics(text, pred_text)
         row["wer"] = wer
         row["cer"] = cer
 
+        # Track all rows
+        references.append(text)
+        hypotheses.append(pred_text)
+        refs_by_lang[lang].append(text)
+        hyps_by_lang[lang].append(pred_text)
+
+        # Track verified rows
+        if is_verified:
+            verified_refs.append(text)
+            verified_hyps.append(pred_text)
+            verified_refs_by_lang[lang].append(text)
+            verified_hyps_by_lang[lang].append(pred_text)
+
     # --------------------------------
     # Compute overall metrics
     # --------------------------------
-    overall_ref = " ".join(references)
-    overall_hyp = " ".join(hypotheses)
+    if args.verified_only:
+        logging.info("===== OVERALL METRICS (VERIFIED ONLY) =====")
+        overall_wer, overall_cer, overall_mer = compute_asr_metrics(
+            verified_refs, verified_hyps
+        )
+    else:
+        logging.info("===== OVERALL METRICS (ALL DATA) =====")
+        overall_wer, overall_cer, overall_mer = compute_asr_metrics(
+            references, hypotheses
+        )
 
-    overall_wer, overall_cer, overall_mer = compute_asr_metrics(
-        overall_ref, overall_hyp
-    )
-
-    logging.info("===== OVERALL METRICS =====")
     logging.info(f"Overall WER: {overall_wer}")
     logging.info(f"Overall CER: {overall_cer}")
     logging.info(f"Overall MER: {overall_mer}")
@@ -135,11 +159,23 @@ def main():
     # --------------------------------
     logging.info("\n===== PER-LANGUAGE METRICS =====")
 
-    for lang in sorted(refs_by_lang.keys()):
-        lang_ref = " ".join(refs_by_lang[lang])
-        lang_hyp = " ".join(hyps_by_lang[lang])
+    langs = sorted(refs_by_lang.keys())
 
-        lang_wer, lang_cer, lang_mer = compute_asr_metrics(lang_ref, lang_hyp)
+    for lang in langs:
+        if args.verified_only:
+            logging.info(
+                "Number of rows for lang %s: %d", lang, len(verified_refs_by_lang[lang])
+            )
+            if len(verified_refs_by_lang[lang]) == 0:
+                logging.info(f"\n--- language: {lang} (no verified rows) ---")
+                continue
+            lang_refs = verified_refs_by_lang[lang]
+            lang_hyps = verified_hyps_by_lang[lang]
+        else:
+            lang_refs = refs_by_lang[lang]
+            lang_hyps = hyps_by_lang[lang]
+
+        lang_wer, lang_cer, lang_mer = compute_asr_metrics(lang_refs, lang_hyps)
 
         logging.info(f"\n--- language: {lang} ---")
         logging.info(f"WER: {lang_wer}")
