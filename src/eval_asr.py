@@ -22,7 +22,7 @@ def transcribe_batch(model, base_model_name, processor, audio_batch, lang, devic
     """
     with torch.no_grad():
         inputs = processor.apply_transcription_request(
-            language="auto",
+            language=lang,
             audio=audio_batch["array"],
             format=["WAV"],
             model_id=base_model_name,
