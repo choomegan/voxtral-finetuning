@@ -2,12 +2,13 @@
 Multitask finetuning for ASR and ST
 """
 
-from collections import Counter
 import logging
 import os
+from collections import Counter
 from datetime import datetime
+
 import torch
-import wandb
+from accelerate import Accelerator
 from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
 from transformers import (
@@ -16,12 +17,14 @@ from transformers import (
     VoxtralForConditionalGeneration,
     VoxtralProcessor,
 )
-from utils.dataset_utils import load_preprocessed_multitask_dataset
+
+import wandb
 from utils.collators import (
     StreamingASRCollator,
     StreamingMultiTaskCollator,
     StreamingSTCollator,
 )
+from utils.dataset_utils import load_preprocessed_multitask_dataset
 from utils.train_utils import SafeTrainer
 
 logging.basicConfig(
@@ -34,14 +37,22 @@ logger = logging.getLogger(__name__)  # module-level logger
 
 
 def main():
+    accelerator = Accelerator()
     config = OmegaConf.load("config/train_multitask.yaml")
 
     # --- Setup WandB ---
-    if config.exp_manager.logger == "wandb":
-        wandb.init(
-            project=config.exp_manager.wandb.project, name=config.exp_manager.name
-        )
-
+    if config.exp_manager.logger == "wandb" and accelerator.is_main_process:
+        if config.trainer.resume_from_checkpoint and config.exp_manager.wandb.run_id:
+            wandb.init(
+                project=config.exp_manager.wandb.project,
+                id=config.exp_manager.wandb.run_id,
+                resume="must",
+            )
+        else:
+            wandb.init(
+                project=config.exp_manager.wandb.project,
+                name=config.exp_manager.name,
+            )
     # --- Experiment name ---
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_name = f"{config.exp_manager.name}_{timestamp}"
@@ -110,13 +121,13 @@ def main():
             config.model,
             torch_dtype=torch.float16,
             quantization_config=bnb_config,
-            device_map={"": int(config.device_id)},  # single GPU
+            # device_map={"": int(config.device_id)},  # single GPU
         )
     else:
         model = VoxtralForConditionalGeneration.from_pretrained(
             config.model,
             torch_dtype=torch.bfloat16 if config.trainer.bf16 else torch.float16,
-            device_map={"": int(config.device_id)},  # single GPU
+            # device_map={"": int(config.device_id)},  # single GPU
         )
 
     # Freeze audio encoder

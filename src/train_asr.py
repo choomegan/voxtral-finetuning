@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 
 import torch
-import wandb
+from accelerate import Accelerator
 from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
 from transformers import (
@@ -17,12 +17,13 @@ from transformers import (
     VoxtralProcessor,
 )
 
-from utils.dataset_utils import load_asr_manifest_dataset
+import wandb
 from utils.collators import StreamingASRCollator
+from utils.dataset_utils import load_asr_manifest_dataset
 from utils.train_utils import SafeTrainer
 
 logging.basicConfig(
-    level=logging.INFO,  # or DEBUG for more verbose logs
+    level=logging.ERROR,  # or DEBUG for more verbose logs
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
@@ -31,21 +32,21 @@ logger = logging.getLogger(__name__)  # module-level logger
 
 
 def main():
+    accelerator = Accelerator()
     # Load training config
     config = OmegaConf.load("config/train_asr.yaml")
 
-    if config.exp_manager.logger == "wandb":
+    if config.exp_manager.logger == "wandb" and accelerator.is_main_process:
         if config.trainer.resume_from_checkpoint and config.exp_manager.wandb.run_id:
-            # resume existing run
             wandb.init(
                 project=config.exp_manager.wandb.project,
                 id=config.exp_manager.wandb.run_id,
                 resume="must",
             )
         else:
-            # start a new run
             wandb.init(
-                project=config.exp_manager.wandb.project, name=config.exp_manager.name
+                project=config.exp_manager.wandb.project,
+                name=config.exp_manager.name,
             )
 
     # Generate timestamped experiment name
@@ -95,13 +96,13 @@ def main():
             config.model,
             torch_dtype=torch.float16,
             quantization_config=bnb_config,
-            device_map={"": int(config.device_id)},  # single GPU
+            # device_map={"": int(config.device_id)},  # single GPU
         )
     else:
         model = VoxtralForConditionalGeneration.from_pretrained(
             config.model,
             torch_dtype=torch.bfloat16 if config.trainer.bf16 else torch.float16,
-            device_map={"": int(config.device_id)},  # single GPU
+            # device_map={"": int(config.device_id)},  # single GPU
         )
 
     # Load model with LoRA configuration
@@ -156,7 +157,7 @@ def main():
         save_total_limit=config.trainer.save_total_limit,
         report_to=config.exp_manager.logger,
         remove_unused_columns=False,
-        dataloader_num_workers=1,
+        dataloader_num_workers=0,
         lr_scheduler_type="cosine",
         seed=3407,
     )
