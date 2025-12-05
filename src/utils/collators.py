@@ -81,9 +81,9 @@ class StreamingASRCollator:
         expected_batch_size = len(features)
 
         try:
-            # Load and resample audio
-            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-                audios = list(executor.map(self._load_and_resample, audio_paths))
+            audios = []
+            for audio_path in audio_paths:
+                audios.append(self._load_and_resample(audio_path))
 
             # Get prompt tokens + audio features
             prompt = self.processor.apply_transcription_request(
@@ -95,8 +95,8 @@ class StreamingASRCollator:
             )
 
         except Exception as e:
-            logger.debug("\n❌ Error in ASR collator during audio processing: %s", e)
-            logger.debug(
+            logger.error("\n❌ Error in ASR collator during audio processing: %s", e)
+            logger.error(
                 "⏭️  Skipping entire ASR batch (%s samples)", expected_batch_size
             )
             return None
