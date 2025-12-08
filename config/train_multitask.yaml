@@ -16,8 +16,9 @@ tasks:
     incl_src_lang: False
 
 trainer:
-  lang_class_weighting: True
-  epochs: 3
+  lang_class_weighting: False
+  task_uncertainty_weighting: True
+  epochs: 4
   lr: 5e-5
   grad_accum: 4
   train_batch_size: 2
