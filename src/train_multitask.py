@@ -184,6 +184,7 @@ def main():
         },
         data_collator=multi_collator,
         lang_weight_map=lang_weights if config.trainer.lang_class_weighting else None,
+        use_uncertainty=config.trainer.task_uncertainty_weighting,
     )
 
     logger.info("Starting multi-task training...")

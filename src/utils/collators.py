@@ -12,7 +12,7 @@ import librosa
 
 from utils.chat_template_utils import build_st_prompt, build_st_prompt_no_src_lang
 from concurrent.futures import ThreadPoolExecutor
-from utils.constants import SRCLANG2ID, LANGCODE_MAP
+from utils.constants import SRCLANG2ID, LANGCODE_MAP, TASKTYPE2ID
 
 logger = logging.getLogger(__name__)  # module-level logger
 
@@ -181,6 +181,7 @@ class StreamingASRCollator:
         batch["source_lang"] = torch.tensor(
             [SRCLANG2ID[f["source_lang"]] for f in features], dtype=torch.long
         )
+        batch['task_type'] = torch.tensor([TASKTYPE2ID['asr']] * len(features), dtype=torch.long)
         return batch
 
 
@@ -303,6 +304,7 @@ class StreamingSTCollator:
             "source_lang": torch.tensor(
                 [SRCLANG2ID[f["source_lang"]] for f in batch], dtype=torch.long
             ),
+            "task_type": torch.tensor([TASKTYPE2ID["s2tt"]] * len(batch), dtype=torch.long),
         }
 
 
@@ -421,5 +423,8 @@ class StreamingMultiTaskCollator:
         # Merge source_lang as simple concatenation
         merged_batch["source_lang"] = torch.cat(
             [asr_batch["source_lang"], st_batch["source_lang"]], dim=0
+        )
+        merged_batch["task_type"] = torch.cat(
+            [asr_batch["task_type"], st_batch["task_type"]], dim=0
         )
         return merged_batch
