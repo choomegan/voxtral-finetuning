@@ -8,6 +8,7 @@ from collections import Counter
 from datetime import datetime
 
 import torch
+import torch.nn as nn
 from accelerate import Accelerator
 from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
@@ -147,6 +148,12 @@ def main():
     model.enable_input_require_grads()
     model.print_trainable_parameters()
 
+    # --- NOW add the uncertainty params on the final wrapped model (FP32, no device)
+    # Do NOT set device here; let Trainer/Accelerate move them.
+    if config.trainer.task_uncertainty_weighting:
+        model.log_var_asr = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+        model.log_var_st = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+
     # --- Training ---
     args = TrainingArguments(
         output_dir=output_dir,
@@ -166,12 +173,13 @@ def main():
         save_total_limit=config.trainer.save_total_limit,
         report_to=config.exp_manager.logger,
         remove_unused_columns=False,
-        # dataloader_num_workers=8,
+        dataloader_num_workers=2,
         # dataloader_prefetch_factor=2,  # Prefetch 2 batches per worker
         dataloader_pin_memory=True,
         gradient_checkpointing=False,
         lr_scheduler_type="cosine",
         seed=3407,
+        ddp_find_unused_parameters=False,
     )
 
     trainer = SafeTrainer(

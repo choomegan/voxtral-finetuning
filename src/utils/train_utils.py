@@ -3,11 +3,12 @@ Trainer utils
 """
 
 import logging
-from transformers import Trainer
 import traceback
-import torch.nn as nn
-from torch.utils.data import DataLoader
+
 import torch
+from torch.utils.data import DataLoader
+from transformers import Trainer
+
 from utils.constants import SRCLANG2ID, TASKTYPE2ID
 
 logger = logging.getLogger(__name__)  # recommended at module level
@@ -39,6 +40,7 @@ class _FilteredDataLoader:
     def __getattr__(self, name):
         # Forward all other attribute access to the underlying dataloader
         return getattr(self.dataloader, name)
+
 
 class SafeTrainer(Trainer):
     """
@@ -75,21 +77,25 @@ class SafeTrainer(Trainer):
         # ---- Uncertainty weighting setup ----
         self.use_uncertainty = use_uncertainty
         if self.use_uncertainty:
-            # Initialize learnable log-variance parameters
-            # log_var = 0 means equal weighting initially (exp(0) = 1)
-            device = next(self.model.parameters()).device
-            self.log_var_asr = nn.Parameter(torch.zeros(1, device=device))
-            self.log_var_st = nn.Parameter(torch.zeros(1, device=device))
-            
-            # Register as model parameters so they're saved/loaded
-            self.model.register_parameter('log_var_asr', self.log_var_asr)
-            self.model.register_parameter('log_var_st', self.log_var_st)
-            
-            logger.info("✓ Uncertainty weighting enabled for ASR and ST tasks")
-        
+            # At this point parameters must already exist inside model:
+            #   model.log_var_asr
+            #   model.log_var_st
+            #
+            # They should have been added inside model subclass or before Trainer init.
+            assert hasattr(
+                self.model, "log_var_asr"
+            ), "Model missing log_var_asr. Add it inside model class."
+            assert hasattr(
+                self.model, "log_var_st"
+            ), "Model missing log_var_st. Add it inside model class."
+
+            logger.info("✓ Uncertainty weighting enabled (using model parameters)")
+
         # Log the selected loss configuration
         if self.use_uncertainty and self.use_lang_weighting:
-            logger.warning("⚠️  Both uncertainty AND language weighting enabled - these are typically used separately")
+            logger.warning(
+                "⚠️  Both uncertainty AND language weighting enabled - these are typically used separately"
+            )
         elif not self.use_uncertainty and not self.use_lang_weighting:
             logger.info("Using standard cross-entropy loss (no weighting)")
 
@@ -101,7 +107,7 @@ class SafeTrainer(Trainer):
         1. Normal loss (no weighting)
         2. Language class weighting (per-sample)
         3. Uncertainty task-based weighting (per-task)
-        
+
         Routes 2 and 3 are mutually exclusive in practice, but can be combined if needed.
         """
         # Extract and remove source_lang from model inputs
@@ -110,7 +116,6 @@ class SafeTrainer(Trainer):
 
         # Get model outputs
         outputs = model(**inputs)
-
 
         # ============================================
         # ROUTE 1: Default loss computation (no weighting)
@@ -149,14 +154,14 @@ class SafeTrainer(Trainer):
         if self.use_lang_weighting and not self.use_uncertainty:
             lang_weight_map_device = self.lang_weight_map.to(source_lang.device)
             lang_weights = lang_weight_map_device[source_lang]  # [batch_size]
-            
+
             # Apply language weights and normalize
             weighted_loss = (per_sample_loss * lang_weights).sum() / lang_weights.sum()
-            
+
             # Restore metadata
             inputs["source_lang"] = source_lang
             inputs["task_type"] = task_type
-            
+
             return (weighted_loss, outputs) if return_outputs else weighted_loss
 
         # ============================================
@@ -164,55 +169,66 @@ class SafeTrainer(Trainer):
         # ============================================
         if self.use_uncertainty:
             # Separate losses by task type
-            asr_mask = (task_type == TASKTYPE2ID['asr']).float()  # 0 = ASR
-            st_mask = (task_type == TASKTYPE2ID['s2tt']).float()   # 1 = ST
-            
+            asr_mask = (task_type == TASKTYPE2ID["asr"]).float()  # 0 = ASR
+            st_mask = (task_type == TASKTYPE2ID["s2tt"]).float()  # 1 = ST
+
             # Optionally apply language weighting first (if both enabled)
             if self.use_lang_weighting:
                 lang_weight_map_device = self.lang_weight_map.to(source_lang.device)
                 lang_weights = lang_weight_map_device[source_lang]  # [batch_size]
                 per_sample_loss = per_sample_loss * lang_weights
-            
+
             # Compute task-specific losses
             asr_loss = (per_sample_loss * asr_mask).sum()
             st_loss = (per_sample_loss * st_mask).sum()
-            
+
             num_asr = asr_mask.sum().clamp(min=1)
             num_st = st_mask.sum().clamp(min=1)
-            
+
             # Average per task
             asr_loss = asr_loss / num_asr
             st_loss = st_loss / num_st
-            
+
             # Apply uncertainty weighting: L = (1/(2σ²)) * L_task + log(σ)
             # Using precision (inverse variance) for numerical stability
-            precision_asr = torch.exp(-self.log_var_asr)
-            precision_st = torch.exp(-self.log_var_st)
-            
-            weighted_loss = (
-                precision_asr * asr_loss + self.log_var_asr +
-                precision_st * st_loss + self.log_var_st
-            )
-            
-            # Log uncertainty values and losses periodically
-            if self.state.global_step % self.args.logging_steps == 0:
-                sigma_asr = torch.exp(0.5 * self.log_var_asr).item()
-                sigma_st = torch.exp(0.5 * self.log_var_st).item()
-                
-                # Log to wandb/tensorboard
-                self.log({
-                    "uncertainty/sigma_asr": sigma_asr,
-                    "uncertainty/sigma_st": sigma_st,
-                    "uncertainty/weight_asr": 1.0 / (2 * sigma_asr**2),
-                    "uncertainty/weight_st": 1.0 / (2 * sigma_st**2),
-                    "loss/asr_unweighted": asr_loss.item(),
-                    "loss/st_unweighted": st_loss.item(),
-                    "batch/num_asr_samples": num_asr.item(),
-                    "batch/num_st_samples": num_st.item(),
-                })
-            
-            return (weighted_loss, outputs) if return_outputs else weighted_loss        
+            real_model = model.module if hasattr(model, "module") else model
 
+            log_var_asr = real_model.log_var_asr
+            log_var_st = real_model.log_var_st
+
+            precision_asr = torch.exp(-log_var_asr)
+            precision_st = torch.exp(-log_var_st)
+
+            weighted_loss = (
+                precision_asr * asr_loss
+                + log_var_asr
+                + precision_st * st_loss
+                + log_var_st
+            )
+
+            # Log uncertainty values and losses periodically
+            if (
+                self.model.training
+                and self.state.global_step % self.args.logging_steps == 0
+            ):
+                sigma_asr = torch.exp(0.5 * log_var_asr).item()
+                sigma_st = torch.exp(0.5 * log_var_st).item()
+
+                # Log to wandb/tensorboard
+                self.log(
+                    {
+                        "uncertainty/sigma_asr": sigma_asr,
+                        "uncertainty/sigma_st": sigma_st,
+                        "uncertainty/weight_asr": 1.0 / (2 * sigma_asr**2),
+                        "uncertainty/weight_st": 1.0 / (2 * sigma_st**2),
+                        "loss/asr_unweighted": asr_loss.item(),
+                        "loss/st_unweighted": st_loss.item(),
+                        "batch/num_asr_samples": num_asr.item(),
+                        "batch/num_st_samples": num_st.item(),
+                    }
+                )
+
+            return (weighted_loss, outputs) if return_outputs else weighted_loss
 
     def evaluate(self, eval_dataset=None, **kwargs):
         """Handle dict of eval datasets"""
