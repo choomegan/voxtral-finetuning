@@ -6,6 +6,7 @@ import logging
 import traceback
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import Trainer
 
@@ -42,6 +43,18 @@ class _FilteredDataLoader:
         return getattr(self.dataloader, name)
 
 
+class UncertaintyModule(nn.Module):
+    """
+    Separate module for uncertainty parameters.
+    This will be wrapped by DDP independently.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.log_var_asr = nn.Parameter(torch.zeros(1))
+        self.log_var_st = nn.Parameter(torch.zeros(1))
+
+
 class SafeTrainer(Trainer):
     """
     Custom trainer that:
@@ -50,54 +63,95 @@ class SafeTrainer(Trainer):
     """
 
     def __init__(self, *args, lang_weight_map=None, use_uncertainty=False, **kwargs):
+        # Store flags
+        self.use_uncertainty = use_uncertainty
+        self.use_lang_weighting = lang_weight_map is not None
+
+        # Create uncertainty module BEFORE super().__init__
+        if self.use_uncertainty:
+            self.uncertainty_module = UncertaintyModule()
+            logger.info("✓ Created uncertainty module")
+        else:
+            self.uncertainty_module = None
+
+        # Call parent init
         super().__init__(*args, **kwargs)
+
+        # Initialize counters
         self.skipped_batches_train = 0
         self.skipped_batches_eval = 0
         self.total_train_batches = 0
         self.total_eval_batches = 0
 
-        # ---- Class weighting setup ----
-
-        self.use_lang_weighting = lang_weight_map is not None
+        # Setup language weighting
         if self.use_lang_weighting:
 
             def _convert_lang_weight_map(lang_weight_map):
                 num_langs = len(SRCLANG2ID)
                 vec = torch.zeros(num_langs, dtype=torch.float32)
-
                 for lang, weight in lang_weight_map.items():
-                    lang_id = SRCLANG2ID[lang]  # guaranteed stable
+                    lang_id = SRCLANG2ID[lang]
                     vec[lang_id] = weight
-
                 return vec
 
-            # Convert {"zsm": w1, "ind": w2} → tensor([w1, w2])
             self.lang_weight_map = _convert_lang_weight_map(lang_weight_map)
+            logger.info("✓ Language class weighting enabled")
+        else:
+            self.lang_weight_map = None
 
-        # ---- Uncertainty weighting setup ----
-        self.use_uncertainty = use_uncertainty
+        # Move uncertainty module to device and wrap with Accelerator
         if self.use_uncertainty:
-            # At this point parameters must already exist inside model:
-            #   model.log_var_asr
-            #   model.log_var_st
-            #
-            # They should have been added inside model subclass or before Trainer init.
-            assert hasattr(
-                self.model, "log_var_asr"
-            ), "Model missing log_var_asr. Add it inside model class."
-            assert hasattr(
-                self.model, "log_var_st"
-            ), "Model missing log_var_st. Add it inside model class."
+            device = next(self.model.parameters()).device
+            self.uncertainty_module = self.uncertainty_module.to(device)
 
-            logger.info("✓ Uncertainty weighting enabled (using model parameters)")
+            # Wrap with Accelerator if available
+            if hasattr(self, "accelerator") and self.accelerator is not None:
+                self.uncertainty_module = self.accelerator.prepare(
+                    self.uncertainty_module
+                )
+                logger.info("✓ Uncertainty module wrapped by Accelerator")
 
-        # Log the selected loss configuration
+            logger.info("✓ Uncertainty weighting enabled")
+
+        # Log configuration
         if self.use_uncertainty and self.use_lang_weighting:
-            logger.warning(
-                "⚠️  Both uncertainty AND language weighting enabled - these are typically used separately"
-            )
+            logger.warning("⚠️  Both uncertainty AND language weighting enabled")
         elif not self.use_uncertainty and not self.use_lang_weighting:
-            logger.info("Using standard cross-entropy loss (no weighting)")
+            logger.info("Using standard cross-entropy loss")
+
+    def create_optimizer(self):
+        """
+        Override to add uncertainty parameters to optimizer.
+        """
+        if not self.use_uncertainty:
+            return super().create_optimizer()
+
+        # Get model (might be wrapped by DDP/Accelerator)
+        opt_model = self.model_wrapped if hasattr(self, "model_wrapped") else self.model
+
+        # Get optimizer class and kwargs from parent
+        optimizer_cls, optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(
+            self.args, opt_model
+        )
+
+        # Get uncertainty parameters (unwrap if needed)
+        if isinstance(self.uncertainty_module, nn.parallel.DistributedDataParallel):
+            uncertainty_params = list(self.uncertainty_module.module.parameters())
+        else:
+            uncertainty_params = list(self.uncertainty_module.parameters())
+
+        # Combine model and uncertainty parameters
+        all_params = [
+            {"params": opt_model.parameters()},
+            {"params": uncertainty_params, "weight_decay": 0.0},
+        ]
+
+        optimizer = optimizer_cls(all_params, **optimizer_kwargs)
+
+        self.optimizer = optimizer
+
+        logger.info("✓ Created optimizer with model + uncertainty parameters")
+        return optimizer
 
     def compute_loss(
         self, model, inputs, return_outputs=False, num_items_in_batch=None
@@ -191,10 +245,12 @@ class SafeTrainer(Trainer):
 
             # Apply uncertainty weighting: L = (1/(2σ²)) * L_task + log(σ)
             # Using precision (inverse variance) for numerical stability
-            real_model = model.module if hasattr(model, "module") else model
-
-            log_var_asr = real_model.log_var_asr
-            log_var_st = real_model.log_var_st
+            if isinstance(self.uncertainty_module, nn.parallel.DistributedDataParallel):
+                log_var_asr = self.uncertainty_module.module.log_var_asr
+                log_var_st = self.uncertainty_module.module.log_var_st
+            else:
+                log_var_asr = self.uncertainty_module.log_var_asr
+                log_var_st = self.uncertainty_module.log_var_st
 
             precision_asr = torch.exp(-log_var_asr)
             precision_st = torch.exp(-log_var_st)
