@@ -31,6 +31,8 @@ Edit training config under config/train_asr.yaml
 
 ```
 uv run src/train_asr.py
+accelerate launch --multi_gpu --num_processes 2 src/train_asr.py 
+
 ```
 
 ### Evaluation
