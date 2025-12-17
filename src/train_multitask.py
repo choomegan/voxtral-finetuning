@@ -164,6 +164,9 @@ def main():
         save_strategy="steps",
         eval_strategy="steps",
         save_total_limit=config.trainer.save_total_limit,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_combined_loss",
+        greater_is_better=False,
         report_to=config.exp_manager.logger,
         remove_unused_columns=False,
         dataloader_num_workers=2,
@@ -186,6 +189,8 @@ def main():
         data_collator=multi_collator,
         lang_weight_map=lang_weights if config.trainer.lang_class_weighting else None,
         use_uncertainty=config.trainer.task_uncertainty_weighting,
+        use_pcgrad=config.trainer.use_pcgrad,
+        pcgrad_reduction=config.trainer.pcgrad_reduction,
     )
 
     logger.info("Starting multi-task training...")
