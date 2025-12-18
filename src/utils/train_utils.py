@@ -53,12 +53,12 @@ class UncertaintyModule(nn.Module):
 class SafeTrainer(Trainer):
     """
     Custom trainer supporting 4 independent strategies:
-
+    
     1. Normal - baseline
     2. Language weighting - per-sample weighting by language frequency
     3. Uncertainty weighting - learnable task weights
     4. PCGrad - gradient-level conflict resolution
-
+    
     PCGrad is orthogonal to loss strategies:
     - PCGrad operates on gradients AFTER loss computation
     - Can be combined with language weighting or used alone
@@ -104,13 +104,12 @@ class SafeTrainer(Trainer):
         self.skipped_batches_eval = 0
         self.total_train_batches = 0
         self.total_eval_batches = 0
-
+        
         # Storage for task losses (used by PCGrad)
         self.current_task_losses = None
 
         # Setup language weighting
         if self.use_lang_weighting:
-
             def _convert_lang_weight_map(lang_weight_map):
                 num_langs = len(SRCLANG2ID)
                 vec = torch.zeros(num_langs, dtype=torch.float32)
@@ -130,25 +129,21 @@ class SafeTrainer(Trainer):
             self.uncertainty_module = self.uncertainty_module.to(device)
 
             if hasattr(self, "accelerator") and self.accelerator is not None:
-                self.uncertainty_module = self.accelerator.prepare(
-                    self.uncertainty_module
-                )
+                self.uncertainty_module = self.accelerator.prepare(self.uncertainty_module)
                 logger.info("✓ Uncertainty module wrapped by Accelerator")
 
             logger.info("✓ Uncertainty weighting enabled")
 
         # Log configuration warnings
         if self.use_pcgrad and self.use_uncertainty:
-            logger.warning(
-                "⚠️  PCGrad + Uncertainty weighting: Not recommended, use one or the other"
-            )
+            logger.warning("⚠️  PCGrad + Uncertainty weighting: Not recommended, use one or the other")
         if self.use_pcgrad and self.use_lang_weighting:
             logger.info("ℹ️  PCGrad + Language weighting: Compatible combination")
 
     def create_optimizer(self):
         """
         Create optimizer and optionally wrap with PCGrad.
-
+        
         IMPORTANT: For PCGrad, we return the wrapper but store the base optimizer
         so that the learning rate scheduler can access it properly.
         """
@@ -174,12 +169,8 @@ class SafeTrainer(Trainer):
 
         # Wrap with PCGrad if enabled
         if self.use_pcgrad:
-            pcgrad_wrapper = self.pcgrad_cls(
-                base_optimizer, reduction=self.pcgrad_reduction
-            )
-            logger.info(
-                f"✓ Wrapped optimizer with PCGrad (reduction={self.pcgrad_reduction})"
-            )
+            pcgrad_wrapper = self.pcgrad_cls(base_optimizer, reduction=self.pcgrad_reduction)
+            logger.info(f"✓ Wrapped optimizer with PCGrad (reduction={self.pcgrad_reduction})")
             # Store the wrapper for training_step to use
             self.optimizer = pcgrad_wrapper
             # IMPORTANT: Return the wrapper so it gets used
@@ -187,7 +178,7 @@ class SafeTrainer(Trainer):
         else:
             self.optimizer = base_optimizer
             return base_optimizer
-
+    
     def create_scheduler(self, num_training_steps: int, optimizer=None):
         """
         Override to handle PCGrad wrapper - pass base optimizer to scheduler.
@@ -197,9 +188,7 @@ class SafeTrainer(Trainer):
             # Pass the base optimizer to the scheduler
             base_optimizer = optimizer._optim
             logger.info("✓ Using base optimizer for LR scheduler")
-            return super().create_scheduler(
-                num_training_steps, optimizer=base_optimizer
-            )
+            return super().create_scheduler(num_training_steps, optimizer=base_optimizer)
         else:
             return super().create_scheduler(num_training_steps, optimizer=optimizer)
 
@@ -208,14 +197,14 @@ class SafeTrainer(Trainer):
     ):
         """
         Compute loss using one of 3 strategies:
-
+        
         1. Normal - use model's built-in loss
         2. Language weighting - weight samples by language frequency
         3. Uncertainty weighting - learnable task weights
-
+        
         For PCGrad: Also stores individual task losses in self.current_task_losses
         so training_step can use them for gradient projection.
-
+        
         NOTE: PCGrad is applied at the GRADIENT level in training_step,
         not at the LOSS level here. This maintains clean separation.
         """
@@ -231,7 +220,7 @@ class SafeTrainer(Trainer):
         # ============================================
         if not self.use_lang_weighting and not self.use_uncertainty:
             loss = outputs["loss"]
-
+            
             # For PCGrad: still need to compute task-specific losses
             if self.use_pcgrad and model.training:
                 # Recompute per-sample losses to separate by task
@@ -249,9 +238,7 @@ class SafeTrainer(Trainer):
                 ).view(batch_size, -1)
 
                 valid_mask = (shift_labels != -100).float()
-                per_sample_loss = per_token_loss.sum(dim=1) / valid_mask.sum(
-                    dim=1
-                ).clamp(min=1)
+                per_sample_loss = per_token_loss.sum(dim=1) / valid_mask.sum(dim=1).clamp(min=1)
 
                 # Separate by task
                 asr_mask = (task_type == TASKTYPE2ID["asr"]).float()
@@ -267,7 +254,7 @@ class SafeTrainer(Trainer):
                 self.current_task_losses = [asr_loss, st_loss]
             else:
                 self.current_task_losses = None
-
+            
             # Restore metadata
             inputs["source_lang"] = source_lang
             inputs["task_type"] = task_type
@@ -305,13 +292,31 @@ class SafeTrainer(Trainer):
             lang_weights = lang_weight_map_device[source_lang]
             per_sample_loss = per_sample_loss * lang_weights
 
-        # Compute task-specific losses
+        # Compute task losses
         asr_loss = (per_sample_loss * asr_mask).sum() / num_asr
         st_loss = (per_sample_loss * st_mask).sum() / num_st
 
         # Store task losses for PCGrad (if enabled and training)
         if self.use_pcgrad and model.training:
-            self.current_task_losses = [asr_loss, st_loss]
+            # CRITICAL: PCGrad requires BOTH tasks to be present in the batch
+            # If only one task, we can't project gradients, so skip PCGrad
+            has_asr = asr_mask.any().item()
+            has_st = st_mask.any().item()
+            
+            if has_asr and has_st:
+                # Both tasks present - use PCGrad
+                self.current_task_losses = [asr_loss, st_loss]
+            else:
+                # Only one task present - can't use PCGrad
+                # Fall back to normal backward in training_step
+                self.current_task_losses = None
+                if self.state.global_step % self.args.logging_steps == 0:
+                    task_status = []
+                    if has_asr:
+                        task_status.append("ASR only")
+                    if has_st:
+                        task_status.append("ST only")
+                    logger.info(f"⚠️  Single-task batch ({', '.join(task_status)}), skipping PCGrad")
         else:
             self.current_task_losses = None
 
@@ -320,7 +325,7 @@ class SafeTrainer(Trainer):
         # ============================================
         if self.use_lang_weighting and not self.use_uncertainty:
             final_loss = asr_loss + st_loss
-
+            
             inputs["source_lang"] = source_lang
             inputs["task_type"] = task_type
             return (final_loss, outputs) if return_outputs else final_loss
@@ -353,18 +358,16 @@ class SafeTrainer(Trainer):
                 sigma_asr = torch.exp(0.5 * log_var_asr).item()
                 sigma_st = torch.exp(0.5 * log_var_st).item()
 
-                self.log(
-                    {
-                        "uncertainty/sigma_asr": sigma_asr,
-                        "uncertainty/sigma_st": sigma_st,
-                        "uncertainty/weight_asr": 1.0 / (2 * sigma_asr**2),
-                        "uncertainty/weight_st": 1.0 / (2 * sigma_st**2),
-                        "loss/asr_unweighted": asr_loss.item(),
-                        "loss/st_unweighted": st_loss.item(),
-                        "batch/num_asr_samples": num_asr.item(),
-                        "batch/num_st_samples": num_st.item(),
-                    }
-                )
+                self.log({
+                    "uncertainty/sigma_asr": sigma_asr,
+                    "uncertainty/sigma_st": sigma_st,
+                    "uncertainty/weight_asr": 1.0 / (2 * sigma_asr**2),
+                    "uncertainty/weight_st": 1.0 / (2 * sigma_st**2),
+                    "loss/asr_unweighted": asr_loss.item(),
+                    "loss/st_unweighted": st_loss.item(),
+                    "batch/num_asr_samples": num_asr.item(),
+                    "batch/num_st_samples": num_st.item(),
+                })
 
             inputs["source_lang"] = source_lang
             inputs["task_type"] = task_type
@@ -376,13 +379,13 @@ class SafeTrainer(Trainer):
     def training_step(self, model, inputs, num_items_in_batch=None):
         """
         Override training_step to use PCGrad when enabled.
-
+        
         PCGrad flow:
         1. Call compute_loss() to get combined loss (and store task losses)
         2. Retrieve task losses from self.current_task_losses
         3. Use pcgrad.pc_backward() instead of loss.backward()
         4. Trainer handles optimizer.step() automatically
-
+        
         Non-PCGrad flow:
         - Use default Trainer behavior (calls loss.backward())
         """
@@ -405,42 +408,53 @@ class SafeTrainer(Trainer):
 
         # Compute loss (this also stores task losses in self.current_task_losses)
         with self.compute_loss_context_manager():
-            loss = self.compute_loss(
-                model, inputs, num_items_in_batch=num_items_in_batch
-            )
+            loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
 
-        # Retrieve task losses
+        # Retrieve task losses: [asr_loss, st_loss]
         task_losses = self.current_task_losses
-
+        
         if task_losses is None:
-            # Fallback: if no task losses available, use standard backward
-            logger.warning(
-                "PCGrad enabled but task losses not available, using standard backward"
-            )
+            # Fallback: if no task losses available (single-task batch), use standard backward
+            if self.state.global_step % 100 == 0:
+                logger.info(f"⚠️  Step {self.state.global_step}: Using standard backward (single-task batch)")
+            
             if self.args.gradient_accumulation_steps > 1:
                 loss = loss / self.args.gradient_accumulation_steps
-
+            
             if self.use_amp:
                 self.scaler.scale(loss).backward()
             else:
                 loss.backward()
-
+            
             return loss.detach()
 
         # Scale task losses for gradient accumulation
         if self.args.gradient_accumulation_steps > 1:
-            task_losses = [
-                l / self.args.gradient_accumulation_steps for l in task_losses
-            ]
+            task_losses = [l / self.args.gradient_accumulation_steps for l in task_losses]
+
+        # DEBUG: Check if losses require gradients and are connected to model
+        if self.state.global_step % 100 == 0:
+            logger.info(f"🔧 Step {self.state.global_step}: Using PCGrad backward")
+            logger.info(f"   ASR loss: {task_losses[0].item():.4f}, requires_grad={task_losses[0].requires_grad}")
+            logger.info(f"   ST loss: {task_losses[1].item():.4f}, requires_grad={task_losses[1].requires_grad}")
 
         # Use PCGrad backward (sets gradients, doesn't call step)
         self.optimizer.pc_backward(task_losses)
+        
+        # DEBUG: Check if gradients were actually set
+        grad_norm = 0.0
+        for param in model.parameters():
+            if param.grad is not None:
+                grad_norm += param.grad.norm().item() ** 2
+        grad_norm = grad_norm ** 0.5
+        
+        if self.state.global_step % 100 == 0:
+            logger.info(f"📊 Step {self.state.global_step}: Gradient norm after PCGrad = {grad_norm:.4f}")
 
         # Log periodically (unscale for display)
-        # Note: With DDP, losses might have multiple elements, so use mean
         if self.state.global_step % self.args.logging_steps == 0:
             scale = self.args.gradient_accumulation_steps
-
+            
             # Helper to safely convert to scalar (handles DDP gathered tensors)
             def to_scalar(tensor):
                 """Convert tensor to scalar, handling DDP multi-element tensors."""
@@ -449,18 +463,13 @@ class SafeTrainer(Trainer):
                         return tensor.mean().item()
                     return tensor.item()
                 return float(tensor)
-
-            self.log(
-                {
-                    "train/asr_loss": to_scalar(task_losses[0]) * scale,
-                    "train/st_loss": to_scalar(task_losses[1]) * scale,
-                    "train/total_loss": to_scalar(loss),
-                }
-            )
-
-        # Ensure scalar loss (Accelerate does this implicitly, python does not)
-        if isinstance(loss, torch.Tensor) and loss.numel() > 1:
-            loss = loss.mean()
+            
+            self.log({
+                "asr_loss": to_scalar(task_losses[0]) * scale,
+                "st_loss": to_scalar(task_losses[1]) * scale,
+                "total_loss": to_scalar(loss),
+                "pcgrad_grad_norm": grad_norm,
+            })
 
         # Return scaled combined loss for logging
         if self.args.gradient_accumulation_steps > 1:
@@ -529,6 +538,7 @@ class SafeTrainer(Trainer):
             return flat_metrics
 
         return super().evaluate(eval_dataset=eval_dataset, **kwargs)
+
 
     def get_train_dataloader(self) -> DataLoader:
         """Wrap dataloader to filter None batches."""
