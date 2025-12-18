@@ -469,8 +469,9 @@ class SafeTrainer(Trainer):
             return loss.detach()
 
     def evaluate(self, eval_dataset=None, **kwargs):
+        """Handle dict of eval datasets."""
         if isinstance(self.eval_dataset, dict):
-            results = {}
+            flat_metrics = {}
             losses = {}
 
             for name, dataset in self.eval_dataset.items():
@@ -478,30 +479,45 @@ class SafeTrainer(Trainer):
                 self.skipped_batches_eval = 0
                 self.total_eval_batches = 0
 
-                res = super().evaluate(
-                    eval_dataset=dataset,
-                    metric_key_prefix=f"eval_{name}",
-                    **kwargs,
-                )
+                try:
+                    res = super().evaluate(
+                        eval_dataset=dataset,
+                        metric_key_prefix=f"eval_{name}",
+                        **kwargs,
+                    )
 
-                results[name] = res
+                    # 🔑 Flatten metrics so Trainer can see them
+                    flat_metrics.update(res)
 
-                # Extract loss if present
-                loss_key = f"eval_{name}_loss"
-                if loss_key in res:
-                    losses[name] = res[loss_key]
+                    # Extract per-task loss
+                    loss_key = f"eval_{name}_loss"
+                    if loss_key in res:
+                        losses[name] = res[loss_key]
+
+                    if self.skipped_batches_eval > 0:
+                        skip_pct = (
+                            100 * self.skipped_batches_eval / max(self.total_eval_batches, 1)
+                        )
+                        logger.info(
+                            "ℹ️  Skipped %s/%s batches (%.2f%%) during %s evaluation",
+                            self.skipped_batches_eval,
+                            self.total_eval_batches,
+                            skip_pct,
+                            name,
+                        )
+
+                except Exception as e:
+                    logger.error("Error evaluating %s: %s", name, e)
+                    traceback.print_exc()
+                    # Still record something so Trainer doesn’t crash
+                    flat_metrics[f"eval_{name}_error"] = 1.0
 
             # ===============================
-            # ADD COMBINED LOSS
+            # ADD COMBINED LOSS (FLAT!)
             # ===============================
             if "asr" in losses and "st" in losses:
                 combined_loss = losses["asr"] + losses["st"]
-
-                # Log it so Trainer & TensorBoard see it
-                self.log({"eval_combined_loss": combined_loss})
-
-                # Also return it (important!)
-                results["combined"] = {"eval_combined_loss": combined_loss}
+                flat_metrics["eval_combined_loss"] = combined_loss
 
                 logger.info(
                     "📊 Combined eval loss: %.4f (ASR %.4f + ST %.4f)",
@@ -510,7 +526,7 @@ class SafeTrainer(Trainer):
                     losses["st"],
                 )
 
-            return results
+            return flat_metrics
 
         return super().evaluate(eval_dataset=eval_dataset, **kwargs)
 
