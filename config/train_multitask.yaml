@@ -16,8 +16,15 @@ tasks:
     incl_src_lang: False
 
 trainer:
+  ### Loss manipulation
   lang_class_weighting: False
-  task_uncertainty_weighting: True
+  task_uncertainty_weighting: False
+
+  ### Gradient manipulation
+  # Note: pcgrad cannot be used with DDP
+  use_pcgrad: True
+  pcgrad_reduction: "mean"
+
   epochs: 4
   lr: 5e-5
   grad_accum: 4
