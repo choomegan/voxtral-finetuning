@@ -500,7 +500,12 @@ class SafeTrainer(Trainer):
             flat_metrics = {}
             losses = {}
 
-            for name, dataset in self.eval_dataset.items():
+            # ensure eval datasets are not None
+            active_datasets = {
+                k: v for k, v in self.eval_dataset.items() if v is not None
+            }
+
+            for name, dataset in active_datasets.items():
                 logger.info("🔍 Evaluating %s dataset (%s samples)", name, len(dataset))
                 self.skipped_batches_eval = 0
                 self.total_eval_batches = 0
@@ -541,21 +546,29 @@ class SafeTrainer(Trainer):
                     flat_metrics[f"eval_{name}_error"] = 1.0
 
             # ===============================
-            # ADD COMBINED LOSS (FLAT!)
+            # DYNAMIC COMBINED LOSS
             # ===============================
-            if "asr" in losses and "st" in losses:
-                combined_loss = losses["asr"] + losses["st"]
+            if losses:
+                combined_loss = sum(losses.values())
                 flat_metrics["eval_combined_loss"] = combined_loss
 
-                logger.info(
-                    "📊 Combined eval loss: %.4f (ASR %.4f + ST %.4f)",
-                    combined_loss,
-                    losses["asr"],
-                    losses["st"],
+                # Create a dynamic log string for the breakdown
+                loss_breakdown = " + ".join(
+                    [f"{k.upper()} {v:.4f}" for k, v in losses.items()]
                 )
 
-            return flat_metrics
+                logger.info(
+                    "📊 Combined eval loss: %.4f (%s)",
+                    combined_loss,
+                    loss_breakdown,
+                )
+            else:
+                # Fallback if no losses were found (e.g. all evals failed or no datasets)
+                # We return infinity so this checkpoint is not saved as "best"
+                flat_metrics["eval_combined_loss"] = float("inf")
+                logger.warning("⚠️ No losses collected during evaluation.")
 
+            return flat_metrics
         return super().evaluate(eval_dataset=eval_dataset, **kwargs)
 
     def get_train_dataloader(self) -> DataLoader:
