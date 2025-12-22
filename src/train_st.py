@@ -10,15 +10,11 @@ import torch
 import wandb
 from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
-from transformers import (
-    BitsAndBytesConfig,
-    TrainingArguments,
-    VoxtralForConditionalGeneration,
-    VoxtralProcessor,
-)
+from transformers import (BitsAndBytesConfig, TrainingArguments,
+                          VoxtralForConditionalGeneration, VoxtralProcessor)
 
-from utils.dataset_utils import load_st_manifest_dataset
 from utils.collators import StreamingSTCollator
+from utils.dataset_utils import load_st_manifest_dataset
 from utils.train_utils import SafeTrainer
 
 logging.basicConfig(
@@ -74,7 +70,9 @@ def main():
     )
 
     # --- Data collator ---
-    data_collator = StreamingSTCollator(processor, model_id=config.model, incl_src_lang=config.tasks.s2tt.incl_src_lang)
+    data_collator = StreamingSTCollator(
+        processor, model_id=config.model, incl_src_lang=config.tasks.s2tt.incl_src_lang
+    )
 
     # --- Model & LoRA setup ---
     logger.info("Loading model...")

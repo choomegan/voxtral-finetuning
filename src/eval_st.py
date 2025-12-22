@@ -14,7 +14,8 @@ from sacrebleu.metrics import BLEU
 from tqdm import tqdm
 from transformers import VoxtralForConditionalGeneration, VoxtralProcessor
 
-from utils.chat_template_utils import build_st_prompt, build_st_prompt_no_src_lang
+from utils.chat_template_utils import (build_st_prompt,
+                                       build_st_prompt_no_src_lang)
 from utils.dataset_utils import load_eval_st_manifest_dataset
 
 logging.basicConfig(

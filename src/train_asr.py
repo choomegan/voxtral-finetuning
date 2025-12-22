@@ -7,17 +7,13 @@ import os
 from datetime import datetime
 
 import torch
+import wandb
 from accelerate import Accelerator
 from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
-from transformers import (
-    BitsAndBytesConfig,
-    TrainingArguments,
-    VoxtralForConditionalGeneration,
-    VoxtralProcessor,
-)
+from transformers import (BitsAndBytesConfig, TrainingArguments,
+                          VoxtralForConditionalGeneration, VoxtralProcessor)
 
-import wandb
 from utils.collators import StreamingASRCollator
 from utils.dataset_utils import load_asr_manifest_dataset
 from utils.train_utils import SafeTrainer
