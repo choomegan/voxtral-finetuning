@@ -9,6 +9,48 @@ uv venv .venv --python 3.10 && source .venv/bin/activate
 uv pip install -r requirements.txt
 ```
 
+# Multi Task
+### Dataset Format
+
+```
+{
+    "source":
+        {
+            "text": "CEO LTAT",             # for t2t
+            "lang": "zsm",
+            "audio_local_path": "audio/TeF4KD586kk-254.wav",
+            "sampling_rate": 16000
+        },
+    "target":
+        {
+            "text": "the CEO of LTAT.",     # for st
+            "lang": "eng"}
+        },
+    "audio_filepath": "audio/audio_1.wav",  # for asr
+    "text": "this is a transcript"
+}
+```
+### Training
+
+Edit training config under config/train_multitask.yaml
+
+To run the training script (single gpu):
+```
+uv run src/train_multitask.py
+```
+
+
+To run the training script (multi-gpu):
+```
+accelerate launch --multi_gpu --num_processes 2 src/train_multitask.py 
+```
+### Evaluation
+Tasks are evaluated separately using `eval_asr.py` and `eval_st.py`
+
+Edit eval config under `config/eval_asr.yaml` and `config/eval_st.yaml`, before running the evaluation scripts.
+
+
+
 # ASR
 
 ### Dataset Format
@@ -105,3 +147,5 @@ To compute xCOMET scores, visit https://huggingface.co/Unbabel/XCOMET-XL to ask 
 ```
 python3 metric_computation/compute_mt_metrics.py --manifest /dir/eval_results.json
 ```
+
+
