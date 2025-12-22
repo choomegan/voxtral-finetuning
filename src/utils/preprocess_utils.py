@@ -62,3 +62,38 @@ def preprocess_st_dataset(manifest_path: str) -> Dataset:
             )
 
     return Dataset.from_list(data)
+
+def preprocess_t2t_dataset(manifest_path: str) -> Dataset:
+    """
+    Lightweight preprocessing for text-to-text translation.
+    Stores source text, target text, and language codes.
+    
+    Expected manifest format (one JSON per line):
+    {
+        "source": {
+            "text": "CEO LTAT",
+            "lang": "zsm"
+        },
+        "target": {
+            "text": "the CEO of LTAT.",
+            "lang": "eng"
+        }
+    }
+    """
+    logger.info("Preparing lightweight T2T translation dataset from: %s", manifest_path)
+    
+    data = []
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        for line in f:
+            entry = json.loads(line.strip())
+            
+            data.append(
+                {
+                    "task": "t2t", 
+                    "source_lang": entry["source"]["lang"],
+                    "source_text": entry["source"]["text"].strip(),
+                    "target_text": entry["target"]["text"].strip(),
+                }
+            )
+    
+    return Dataset.from_list(data)

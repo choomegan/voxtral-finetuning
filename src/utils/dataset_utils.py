@@ -10,6 +10,7 @@ from datasets import Audio, Dataset, interleave_datasets
 from utils.preprocess_utils import (
     preprocess_asr_dataset,
     preprocess_st_dataset,
+    preprocess_t2t_dataset
 )
 
 logger = logging.getLogger(__name__)  # module-level logger
@@ -63,46 +64,117 @@ def load_st_manifest_dataset(
             }
     }
     """
-    train_dataset = preprocess_st_dataset(train_manifest)
-    eval_dataset = preprocess_st_dataset(eval_manifest)
+    train_dataset = preprocess_t2t_dataset(train_manifest)
+    eval_dataset = preprocess_t2t_dataset(eval_manifest)
     logger.info(f"✅ Train dataset size: {len(train_dataset)}")
     logger.info(f"✅ Eval dataset size: {len(eval_dataset)}")
     return train_dataset, eval_dataset
 
+def load_t2t_manifest_dataset(
+    train_manifest: str, eval_manifest: str
+) -> Tuple[Dataset, Dataset]:
+    """
+    Data loader for speech translation
+
+    Load dataset from a JSON manifest file and make audio filepaths absolute.
+    Each line should have:
+    {
+        "source":
+            {
+                "text": "CEO LTAT",
+                "lang": "zsm",
+                "audio_local_path": "audio/TeF4KD586kk-254.wav",
+                "sampling_rate": 16000
+            },
+        "target":
+            {
+                "text": "the CEO of LTAT.",
+                "lang": "eng"}
+            }
+    }
+    """
+    train_dataset = preprocess_t2t_dataset(train_manifest)
+    eval_dataset = preprocess_t2t_dataset(eval_manifest)
+    logger.info(f"✅ Train dataset size: {len(train_dataset)}")
+    logger.info(f"✅ Eval dataset size: {len(eval_dataset)}")
+    return train_dataset, eval_dataset
 
 def load_preprocessed_multitask_dataset(
     train_manifest: str,
     eval_manifest: str,
+    incl_asr: bool = False,
+    incl_s2tt: bool = False,
+    incl_t2t: bool = False,
 ) -> Tuple[Dataset, Dataset, Dataset]:
     """
     Load or create preprocessed datasets for both tasks.
     Uses datasets' automatic caching - memory mapped and cached to disk automatically.
     """
+    train_datasets = []
+    task_names = []
+    eval_datasets = {}
+
+
     logger.info("Loading/preprocessing training datasets...")
-    train_asr = preprocess_asr_dataset(
-        train_manifest,
-    )
-    train_st = preprocess_st_dataset(
-        train_manifest,
-    )
 
-    logger.info("Loading/preprocessing evaluation datasets...")
-    eval_asr = preprocess_asr_dataset(eval_manifest)
-    eval_st = preprocess_st_dataset(
-        eval_manifest,
-    )
+    # ========== ASR ==========
+    if incl_asr:
+        logger.info("Loading/preprocessing ASR dataset...")
 
+        train_asr = preprocess_asr_dataset(
+            train_manifest,
+        )
+        eval_asr = preprocess_asr_dataset(eval_manifest)
+
+        train_datasets.append(train_asr)
+        task_names.append("asr")
+        eval_datasets["asr"] = eval_asr
+    else:
+        eval_datasets['asr'] = None
+        logger.info("⏭️  ASR task disabled")
+
+    # ========== ST (Speech Translation) ==========
+    if incl_s2tt:
+        train_st = preprocess_st_dataset(
+            train_manifest,
+        )
+        eval_st = preprocess_st_dataset(eval_manifest)
+
+        train_datasets.append(train_st)
+        task_names.append("st")
+        eval_datasets["st"] = eval_st
+    else:    
+        eval_datasets['st'] = None
+        logger.info("⏭️  ST task disabled")
+
+    # ========== T2T (Text-to-Text Translation) ==========
+    if incl_t2t:
+        train_t2t = preprocess_t2t_dataset(
+            train_manifest,
+        )
+        eval_t2t = preprocess_t2t_dataset(eval_manifest)
+
+        train_datasets.append(train_t2t)
+        task_names.append("t2t")
+        eval_datasets["t2t"] = eval_t2t
+    else:
+        eval_datasets['t2t'] = None
+        logger.info("⏭️  T2T task disabled")
+
+    probabilities = [1.0 / len(train_datasets)] * len(train_datasets)
+    
     # Interleave dataset with equal probability
     train_dataset = interleave_datasets(
-        [train_asr, train_st],
-        probabilities=[0.5, 0.5],
+        train_datasets,
+        probabilities=probabilities,
         seed=42,
         stopping_strategy="all_exhausted",
     )
-
-    logger.info("Total training samples: %s", len(train_dataset))
-
-    return train_dataset, eval_asr, eval_st
+    logger.info(f"Multi-task mode: {', '.join(task_names)}")
+    
+    logger.info(f"Total training samples: {len(train_dataset)}")
+    
+    return train_dataset, eval_datasets['asr'], eval_datasets['st'], eval_datasets['t2t']
 
 
 def load_eval_asr_manifest_dataset(
@@ -140,6 +212,7 @@ def load_eval_asr_manifest_dataset(
             data.append(entry)
 
     dataset = Dataset.from_list(data)
+
 
     # add column to retain original audio_filepath
     dataset = dataset.add_column(

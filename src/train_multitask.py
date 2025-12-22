@@ -8,22 +8,15 @@ from collections import Counter
 from datetime import datetime
 
 import torch
+import wandb
 from accelerate import Accelerator
 from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
-from transformers import (
-    BitsAndBytesConfig,
-    TrainingArguments,
-    VoxtralForConditionalGeneration,
-    VoxtralProcessor,
-)
+from transformers import (BitsAndBytesConfig, TrainingArguments,
+                          VoxtralForConditionalGeneration, VoxtralProcessor)
 
-import wandb
-from utils.collators import (
-    StreamingASRCollator,
-    StreamingMultiTaskCollator,
-    StreamingSTCollator,
-)
+from utils.collators import (StreamingASRCollator, StreamingMultiTaskCollator,
+                             StreamingSTCollator, StreamingT2TCollator)
 from utils.dataset_utils import load_preprocessed_multitask_dataset
 from utils.train_utils import SafeTrainer
 
@@ -34,6 +27,52 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)  # module-level logger
+
+
+def _initialize_collators(config, processor, model_id):
+    """
+    Initialize only the collators needed based on enabled tasks.
+    """
+    tasks_config = config.get("tasks", {})
+
+    collators = {}
+
+    # ASR collator
+    if tasks_config.get("asr", {}).get("enabled", False):
+        asr_config = tasks_config["asr"]
+        collators["asr"] = StreamingASRCollator(
+            processor=processor,
+            model_id=model_id,
+            sample_rate=16000,
+            lang=None,  # Will use per-sample language from manifest
+        )
+        logger.info("✅ Initialized ASR collator")
+
+    # ST collator
+    if tasks_config.get("s2tt", {}).get("enabled", False):
+        st_config = tasks_config["s2tt"]
+        collators["st"] = StreamingSTCollator(
+            processor=processor,
+            model_id=model_id,
+            incl_src_lang=st_config.get("incl_src_lang", True),
+        )
+        logger.info("✅ Initialized ST collator")
+
+    # T2T collator
+    if tasks_config.get("t2t", {}).get("enabled", False):
+        collators["t2t"] = StreamingT2TCollator(
+            processor=processor,
+            model_id=model_id,
+        )
+        logger.info("✅ Initialized T2T collator")
+
+    multitask_collator = StreamingMultiTaskCollator(
+        asr_collator=collators.get("asr"),
+        st_collator=collators.get("st"),
+        t2t_collator=collators.get("t2t"),
+    )
+    logger.info("✅ Initialized multi-task collator")
+    return multitask_collator
 
 
 def main():
@@ -67,17 +106,21 @@ def main():
 
     # Load preprocessed datasets (this caches to disk)
     logger.info("Loading or creating preprocessed datasets...")
-    train_dataset, eval_dataset_asr, eval_dataset_st = (
+    train_dataset, eval_dataset_asr, eval_dataset_st, eval_dataset_t2t = (
         load_preprocessed_multitask_dataset(
             train_manifest=config.data.train_manifest,
             eval_manifest=config.data.eval_manifest,
+            incl_asr=config.tasks.asr.enabled,
+            incl_s2tt=config.tasks.s2tt.enabled,
+            incl_t2t=config.tasks.t2t.enabled,
         )
     )
 
     logger.info(
-        "Eval dataset sizes — ASR: %s, ST: %s",
-        len(eval_dataset_asr),
-        len(eval_dataset_st),
+        "Eval dataset sizes — ASR: %s, ST: %s, T2T: %s",
+        len(eval_dataset_asr) if eval_dataset_asr else "N/A",
+        len(eval_dataset_st) if eval_dataset_st else "N/A",
+        len(eval_dataset_t2t) if eval_dataset_t2t else "N/A",
     )
 
     # --- Compute language weights ---
@@ -101,11 +144,9 @@ def main():
         logger.info("Normalized language weights: %s", lang_weights)
 
     # --- Collators ---
-    asr_collator = StreamingASRCollator(processor, model_id=config.model)
-    st_collator = StreamingSTCollator(
-        processor, model_id=config.model, incl_src_lang=config.tasks.s2tt.incl_src_lang
+    multi_collator = _initialize_collators(
+        config, processor=processor, model_id=config.model
     )
-    multi_collator = StreamingMultiTaskCollator(asr_collator, st_collator)
 
     # --- Model ---
     logger.info("Loading model...")
@@ -185,6 +226,7 @@ def main():
         eval_dataset={
             "asr": eval_dataset_asr,
             "st": eval_dataset_st,
+            "t2t": eval_dataset_t2t,
         },
         data_collator=multi_collator,
         lang_weight_map=lang_weights if config.trainer.lang_class_weighting else None,

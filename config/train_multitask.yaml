@@ -13,7 +13,12 @@ lora:
 
 tasks:
   s2tt:
+    enabled: True
     incl_src_lang: False
+  asr:
+    enabled: True
+  t2t:
+    enabled: False
 
 trainer:
   ### Loss manipulation
@@ -22,7 +27,7 @@ trainer:
 
   ### Gradient manipulation
   # Note: pcgrad cannot be used with DDP
-  use_pcgrad: True
+  use_pcgrad: False
   pcgrad_reduction: "mean"
 
   epochs: 4
