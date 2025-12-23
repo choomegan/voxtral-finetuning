@@ -216,7 +216,7 @@ def main():
         gradient_checkpointing=False,
         lr_scheduler_type="cosine",
         seed=3407,
-        ddp_find_unused_parameters=False,
+        ddp_find_unused_parameters=True,
     )
 
     trainer = SafeTrainer(
