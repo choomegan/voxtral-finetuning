@@ -356,7 +356,17 @@ class StreamingMultiTaskCollator:
             "st": st_collator,
             "t2t": t2t_collator,
         }
-        self.pad_id = asr_collator.pad_id
+        # Iterate through the collators and pick the first one that isn't None
+        first_valid_collator = next(
+            (c for c in self.task_collators.values() if c is not None), None
+        )
+
+        if first_valid_collator is None:
+            raise ValueError(
+                "At least one collator must be provided to initialize pad_id."
+            )
+
+        self.pad_id = first_valid_collator.pad_id
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         # 2. Group inputs by task (Single pass grouping)
