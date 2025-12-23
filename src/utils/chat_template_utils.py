@@ -26,6 +26,7 @@ def build_st_prompt(src_lang: str, audio_path: str) -> List[Dict]:
         },
     ]
 
+
 def build_st_prompt_no_src_lang(audio_path: str) -> List[Dict]:
     """
     Build speech translation chat prompt without source language
@@ -44,6 +45,7 @@ def build_st_prompt_no_src_lang(audio_path: str) -> List[Dict]:
         },
     ]
 
+
 def build_t2t_prompt_no_src_lang(src_text: str) -> List[Dict]:
     """
     Build text-to-text chat prompt without source language
@@ -55,7 +57,7 @@ def build_t2t_prompt_no_src_lang(src_text: str) -> List[Dict]:
             "content": [
                 {
                     "type": "text",
-                    "text": f"Translate this text into English: \n\n{src_text}",
+                    "text": f"Translate the following text into English. Only output the English translation. \n Input: {src_text}\n English:",
                 },
             ],
         },
