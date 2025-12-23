@@ -1,0 +1,6 @@
+model: mistralai/Voxtral-Mini-3B-2507
+checkpoint_path: mistralai/Voxtral-Mini-3B-2507
+manifest: /home/pumba-04/Desktop/MEGAN/datasets/MOOFOO_S2TT/v3_test.json
+output_path: ./eval_results/pretrained_3B_t2t_test.json
+device: 0
+
