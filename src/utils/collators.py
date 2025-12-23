@@ -3,6 +3,7 @@ Script for dataset collators for different tasks.
 These collators assume that the datasets have already been preprocessed
 """
 
+from collections import defaultdict
 import logging
 import torch
 from typing import List, Dict, Any
@@ -44,6 +45,165 @@ def validate_batch_alignment(batch_dict, expected_batch_size, context=""):
     return True
 
 
+class BaseChatCollator:
+    """
+    Parent class for ST and T2T tasks.
+    Handles Chat Template application, Tokenization, and Label Masking.
+    """
+
+    def __init__(self, processor, model_id, inst_token_id=4):
+        self.processor = processor
+        self.tokenizer = processor.tokenizer
+        self.model_id = model_id
+        self.pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
+        self.inst_end_token_id = inst_token_id
+
+        # Validation
+        decoded = self.tokenizer.decode([self.inst_end_token_id])
+        logger.info(
+            f"Initialized {self.__class__.__name__}. Token {self.inst_end_token_id} = '{decoded}'"
+        )
+
+    def build_conversations(self, batch):
+        """Child classes must implement this to return a list of message lists."""
+        raise NotImplementedError
+
+    def __call__(self, batch):
+        if not batch:
+            return None
+
+        try:
+            # 1. Build Conversations (Child logic)
+            conversations = self.build_conversations(batch)
+
+            # 2. Apply Template (Shared logic)
+            model_inputs = self.processor.apply_chat_template(
+                conversations,
+                return_tensors="pt",
+                tokenize=True,
+                padding="longest",
+                continue_final_message=True,
+            )
+
+            # 3. Validate
+            if not validate_batch_alignment(
+                model_inputs, len(batch), context=self.__class__.__name__
+            ):
+                logger.error("⏭️  Skipping entire batch (%s samples)")
+                return None
+
+            # 4. Create Labels (Shared logic)
+            input_ids = model_inputs["input_ids"]
+            labels = self._mask_chat_labels(
+                input_ids, self.pad_id, self.inst_end_token_id
+            )
+
+            # 5. Return Standardized Dict
+            return {
+                "input_ids": input_ids,
+                "attention_mask": model_inputs["attention_mask"],
+                "labels": labels,
+                # ST will have input_features, T2T will have None. Safe .get() handles both.
+                "input_features": model_inputs.get("input_features"),
+                "source_lang": torch.tensor(
+                    [SRCLANG2ID[f["source_lang"]] for f in batch], dtype=torch.long
+                ),
+                "task_type": torch.tensor(
+                    [self.TASK_ID] * len(batch), dtype=torch.long
+                ),
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Error in {self.__class__.__name__}: {e}")
+            return None
+
+    def _mask_chat_labels(self, input_ids, pad_id, inst_end_token_id):
+        """
+        Creates labels for chat-based tasks.
+        Masks everything up to [/INST] and masks padding.
+        """
+        labels = input_ids.clone()
+
+        # 1. Mask Padding
+        labels[input_ids == pad_id] = -100
+
+        # 2. Mask Prompt (Instruction)
+        # Find position of [/INST] token
+        for i in range(input_ids.size(0)):
+            inst_end_positions = (input_ids[i] == inst_end_token_id).nonzero(
+                as_tuple=True
+            )[0]
+
+            if len(inst_end_positions) > 0:
+                # Mask everything up to and including [/INST]
+                prompt_len = inst_end_positions[0].item() + 1
+                labels[i, :prompt_len] = -100
+            else:
+                logger.warning(
+                    f"Warning: Instruction end token {inst_end_token_id} not found in sample {i}"
+                )
+                # Fallback: Mask everything to avoid training on garbage
+                labels[i, :] = -100
+
+        return labels
+
+
+class StreamingT2TCollator(BaseChatCollator):
+    TASK_ID = TASKTYPE2ID["t2t"]
+
+    def build_conversations(self, batch):
+        conversations = []
+        for entry in batch:
+            prompt_msg = build_t2t_prompt_no_src_lang(entry["source_text"])
+            conversations.append(
+                prompt_msg
+                + [
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": entry["target_text"]}],
+                    }
+                ],
+            )
+        return conversations
+
+
+class StreamingSTCollator(BaseChatCollator):
+    """
+    Speech Translation Collator that inherits from BaseChatCollator.
+    """
+
+    TASK_ID = TASKTYPE2ID["s2tt"]
+
+    def __init__(self, processor, model_id, incl_src_lang=True, **kwargs):
+        super().__init__(processor, model_id, **kwargs)
+
+        self.incl_src_lang = incl_src_lang
+
+    def build_conversations(self, batch):
+        """
+        Build speech translation conversation with or without source language
+        """
+        conversations = []
+        for entry in batch:
+            # Logic specific to ST prompt building
+            prompt_msg = (
+                build_st_prompt(entry["source_lang"], entry["audio_path"])
+                if self.incl_src_lang
+                else build_st_prompt_no_src_lang(entry["audio_path"])
+            )
+
+            conversations.append(
+                prompt_msg
+                + [
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": entry["target_text"]}],
+                    }
+                ]
+            )
+        return conversations
+
+
 class StreamingASRCollator:
     """
     Fixed ASR collator that creates labels aligned with input_ids.
@@ -73,17 +233,19 @@ class StreamingASRCollator:
         if not features:
             return None  # Return None instead of {} to signal skip
 
-        # Collect paths and texts
-        audio_paths = [f["audio_path"] for f in features]
-        texts = [f["text"] for f in features]
-        if not self.lang:  # assume that language is provided in the per-row manifest
-            source_langs = [LANGCODE_MAP[f["source_lang"]] for f in features]
-        else:
-            source_langs = None
-
-        expected_batch_size = len(features)
-
         try:
+            # Collect paths and texts
+            audio_paths = [f["audio_path"] for f in features]
+            texts = [f["text"] for f in features]
+            if (
+                not self.lang
+            ):  # assume that language is provided in the per-row manifest
+                source_langs = [LANGCODE_MAP[f["source_lang"]] for f in features]
+            else:
+                source_langs = None
+
+            expected_batch_size = len(features)
+
             audios = []
             for audio_path in audio_paths:
                 audios.append(self._load_and_resample(audio_path))
@@ -97,327 +259,89 @@ class StreamingASRCollator:
                 return_tensors="pt",
             )
 
-        except Exception as e:
-            logger.error("\n❌ Error in ASR collator during audio processing: %s", e)
-            logger.error(
-                "⏭️  Skipping entire ASR batch (%s samples)", expected_batch_size
-            )
-            return None
-
-        # Validate batch alignment
-        if not validate_batch_alignment(
-            prompt, expected_batch_size, context="ASR features"
-        ):
-            logger.debug(
-                f"⏭️  Skipping entire ASR batch (%s samples)", expected_batch_size
-            )
-            return None
-
-        prompt_ids = prompt["input_ids"]  # [B, prompt_len]
-        prompt_attn = prompt["attention_mask"]  # [B, prompt_len]
-
-        # Tokenize target text (no padding yet)
-        text_tokens = self.tokenizer(
-            texts,
-            add_special_tokens=False,
-            padding=False,
-            truncation=True,
-            max_length=256,
-            return_tensors=None,  # Return lists
-        )
-        text_ids_list = text_tokens["input_ids"]
-
-        # Build input_ids and labels WITH SAME LENGTH
-        B = len(texts)
-
-        # Calculate actual prompt lengths (exclude padding)
-        prompt_lens = prompt_attn.sum(dim=1).tolist()
-        text_lens = [len(t) for t in text_ids_list]
-
-        # Max length: prompt + text + EOS
-        max_len = max(pl + tl + 1 for pl, tl in zip(prompt_lens, text_lens))
-
-        # Pre-allocate tensors
-        input_ids = torch.full((B, max_len), self.pad_id, dtype=torch.long)
-        attention_mask = torch.zeros((B, max_len), dtype=torch.long)
-        labels = torch.full((B, max_len), -100, dtype=torch.long)
-
-        # Fill tensors
-        for i in range(B):
-            pl = prompt_lens[i]
-            tl = text_lens[i]
-
-            # Copy prompt
-            input_ids[i, :pl] = prompt_ids[i, :pl]
-            attention_mask[i, :pl] = 1
-            # labels[i, :pl] stays -100 (ignore prompt in loss)
-
-            # Copy text
-            text_tensor = torch.tensor(text_ids_list[i], dtype=torch.long)
-            input_ids[i, pl : pl + tl] = text_tensor
-            attention_mask[i, pl : pl + tl] = 1
-            labels[i, pl : pl + tl] = text_tensor  # Learn text tokens
-
-            # Add EOS
-            input_ids[i, pl + tl] = self.eos_id
-            attention_mask[i, pl + tl] = 1
-            labels[i, pl + tl] = self.eos_id
-
-        batch = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
-            "input_features": prompt.get("input_features", None),
-        }
-
-        # Convert input_features to tensor if needed
-        if batch["input_features"] is not None:
-            if isinstance(batch["input_features"], np.ndarray):
-                batch["input_features"] = torch.tensor(
-                    batch["input_features"], dtype=torch.float32
+            # Validate batch alignment
+            if not validate_batch_alignment(
+                prompt, expected_batch_size, context="ASR features"
+            ):
+                logger.debug(
+                    f"⏭️  Skipping entire ASR batch (%s samples)", expected_batch_size
                 )
-            elif isinstance(batch["input_features"], list):
-                batch["input_features"] = torch.tensor(
-                    np.stack(batch["input_features"]), dtype=torch.float32
+                return None
+
+            prompt_ids = prompt["input_ids"]  # [B, prompt_len]
+            prompt_attn = prompt["attention_mask"]  # [B, prompt_len]
+
+            # Tokenize target text (no padding yet)
+            text_tokens = self.tokenizer(
+                texts,
+                add_special_tokens=False,
+                padding=False,
+                truncation=True,
+                max_length=256,
+                return_tensors=None,  # Return lists
+            )
+            text_ids_list = text_tokens["input_ids"]
+
+            # Build input_ids and labels WITH SAME LENGTH
+            B = len(texts)
+
+            # Calculate actual prompt lengths (exclude padding)
+            prompt_lens = prompt_attn.sum(dim=1).tolist()
+            text_lens = [len(t) for t in text_ids_list]
+
+            # Max length: prompt + text + EOS
+            max_len = max(pl + tl + 1 for pl, tl in zip(prompt_lens, text_lens))
+
+            # Pre-allocate tensors
+            input_ids = torch.full((B, max_len), self.pad_id, dtype=torch.long)
+            attention_mask = torch.zeros((B, max_len), dtype=torch.long)
+            labels = torch.full((B, max_len), -100, dtype=torch.long)
+
+            # Fill tensors
+            for i in range(B):
+                pl = prompt_lens[i]
+                tl = text_lens[i]
+
+                # Copy prompt
+                input_ids[i, :pl] = prompt_ids[i, :pl]
+                attention_mask[i, :pl] = 1
+                # labels[i, :pl] stays -100 (ignore prompt in loss)
+
+                # Copy text
+                text_tensor = torch.tensor(text_ids_list[i], dtype=torch.long)
+                input_ids[i, pl : pl + tl] = text_tensor
+                attention_mask[i, pl : pl + tl] = 1
+                labels[i, pl : pl + tl] = text_tensor  # Learn text tokens
+
+                # Add EOS
+                input_ids[i, pl + tl] = self.eos_id
+                attention_mask[i, pl + tl] = 1
+                labels[i, pl + tl] = self.eos_id
+
+            # We explicitly cast to tensors here to clean up the main logic flow
+            feat = prompt.get("input_features")
+            if feat is not None and not isinstance(feat, torch.Tensor):
+                feat = torch.tensor(
+                    np.stack(feat) if isinstance(feat, list) else feat,
+                    dtype=torch.float32,
                 )
 
-        batch["source_lang"] = torch.tensor(
-            [SRCLANG2ID[f["source_lang"]] for f in features], dtype=torch.long
-        )
-        batch["task_type"] = torch.tensor(
-            [TASKTYPE2ID["asr"]] * len(features), dtype=torch.long
-        )
-        return batch
-
-
-class StreamingSTCollator:
-    """
-    ST collator - skips entire batch on alignment issues.
-    """
-
-    def __init__(
-        self,
-        processor,
-        model_id: str,
-        incl_src_lang: bool = True,
-        max_length: int = 512,
-    ):
-        self.processor = processor
-        self.model_id = model_id
-        self.tokenizer = processor.tokenizer
-        self.incl_src_lang = incl_src_lang
-
-        self.max_length = max_length
-        self.pad_id = (
-            processor.tokenizer.pad_token_id or processor.tokenizer.eos_token_id
-        )
-        #  Find the [/INST] token ID (marks end of instruction, start of response)
-        self.inst_end_token_id = 4
-        logger.info("Using [/INST] token ID: %s", self.inst_end_token_id)
-
-        # Verify it decodes correctly
-        decoded = self.tokenizer.decode([self.inst_end_token_id])
-        logger.info(
-            "Token %s decodes to: '%s'",
-            self.inst_end_token_id,
-            decoded,
-        )
-
-    def __call__(self, batch):
-        if not batch:
-            return None  # Return None instead of {}
-
-        expected_batch_size = len(batch)
-
-        try:
-            # Collect all prompts and conversations
-            full_conversations = []
-
-            for entry in batch:
-                audio_path = entry["audio_path"]
-                src_lang = entry["source_lang"]
-                tgt_text = entry["target_text"]
-
-                # Build prompt
-                prompt_messages = (
-                    build_st_prompt(src_lang, audio_path)
-                    if self.incl_src_lang
-                    else build_st_prompt_no_src_lang(audio_path)
-                )
-
-                # Build full conversation
-                full_messages = prompt_messages + [
-                    {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": tgt_text}],
-                    }
-                ]
-                full_conversations.append(full_messages)
-
-            # Process only ONCE
-            model_inputs = self.processor.apply_chat_template(
-                full_conversations,
-                return_tensors="pt",
-                tokenize=True,
-                padding="longest",
-                continue_final_message=True,
-            )
+            return {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+                "labels": labels,
+                "input_features": feat,
+                "source_lang": torch.tensor(
+                    [SRCLANG2ID[f["source_lang"]] for f in features], dtype=torch.long
+                ),
+                "task_type": torch.tensor(
+                    [TASKTYPE2ID["asr"]] * len(features), dtype=torch.long
+                ),
+            }
 
         except Exception as e:
-            logger.error("\n❌ Error in ST collator during processing: %s", e)
-            logger.error(
-                "⏭️  Skipping entire ST batch (%s samples)", expected_batch_size
-            )
+            logger.error(f"❌ Error in ASR Collator: {e}")
             return None
-
-        # Validate batch alignment
-        if not validate_batch_alignment(
-            model_inputs, expected_batch_size, context="ST features"
-        ):
-            logger.error(
-                "⏭️  Skipping entire ST batch (%s samples)", expected_batch_size
-            )
-            return None
-
-        input_ids = model_inputs["input_ids"]
-        labels = input_ids.clone()
-
-        # Find [/INST] token to determine where assistant response starts
-        for i in range(input_ids.size(0)):
-            # Find position of [/INST] token
-            inst_end_positions = (input_ids[i] == self.inst_end_token_id).nonzero(
-                as_tuple=True
-            )[0]
-
-            if len(inst_end_positions) > 0:
-                # Mask everything up to and including [/INST]
-                prompt_len = inst_end_positions[0].item() + 1
-                labels[i, :prompt_len] = -100
-            else:
-                # Fallback: if [/INST] not found, mask everything (shouldn't happen)
-                logger.error("Warning: [/INST] token not found in sample %s", i)
-                labels[i, :] = -100
-
-            # Mask padding
-            labels[i][input_ids[i] == self.pad_id] = -100
-
-        return {
-            "input_ids": input_ids,
-            "attention_mask": model_inputs["attention_mask"],
-            "labels": labels,
-            "input_features": model_inputs.get("input_features"),
-            "source_lang": torch.tensor(
-                [SRCLANG2ID[f["source_lang"]] for f in batch], dtype=torch.long
-            ),
-            "task_type": torch.tensor(
-                [TASKTYPE2ID["s2tt"]] * len(batch), dtype=torch.long
-            ),
-        }
-
-
-class StreamingT2TCollator:
-    """
-    Text-to-text translation collator.
-    Handles pure text translation without audio processing.
-    """
-
-    def __init__(
-        self,
-        processor,
-        model_id: str = None,
-        max_length: int = 512,
-    ):
-        self.processor = processor
-        self.tokenizer = processor.tokenizer
-        self.max_length = max_length
-        self.pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
-
-        # Find [/INST] token ID
-        self.inst_end_token_id = 4
-        logger.info("Using [/INST] token ID: %s", self.inst_end_token_id)
-
-    def __call__(self, batch):
-        if not batch:
-            return None
-
-        expected_batch_size = len(batch)
-
-        try:
-            # Build conversations for each sample
-            conversations = []
-            for entry in batch:
-                src_lang = entry["source_lang"]
-                src_text = entry["source_text"]
-                tgt_text = entry["target_text"]
-
-                # Build translation prompt
-                prompt_message = build_t2t_prompt_no_src_lang(src_text)
-
-                # Build full conversation
-                full_messages = prompt_message + [
-                    {
-                        "role": "assistant",
-                        "content": [{"type": "text", "text": tgt_text}],
-                    }
-                ]
-                conversations.append(full_messages)
-
-            # Process with chat template
-            model_inputs = self.processor.apply_chat_template(
-                conversations,
-                return_tensors="pt",
-                tokenize=True,
-                padding="longest",
-                continue_final_message=True,
-            )
-
-        except Exception as e:
-            logger.error("\n❌ Error in T2T collator during processing: %s", e)
-            logger.error(
-                "⏭️  Skipping entire T2T batch (%s samples)", expected_batch_size
-            )
-            return None
-
-        # Validate batch alignment
-        if not validate_batch_alignment(
-            model_inputs, expected_batch_size, context="T2T features"
-        ):
-            logger.error(
-                "⏭️  Skipping entire T2T batch (%s samples)", expected_batch_size
-            )
-            return None
-
-        input_ids = model_inputs["input_ids"]
-        labels = input_ids.clone()
-
-        # Mask prompt tokens (everything before [/INST])
-        for i in range(input_ids.size(0)):
-            inst_end_positions = (input_ids[i] == self.inst_end_token_id).nonzero(
-                as_tuple=True
-            )[0]
-
-            if len(inst_end_positions) > 0:
-                prompt_len = inst_end_positions[0].item() + 1
-                labels[i, :prompt_len] = -100
-            else:
-                logger.error("Warning: [/INST] token not found in sample %s", i)
-                labels[i, :] = -100
-
-            # Mask padding
-            labels[i][input_ids[i] == self.pad_id] = -100
-
-        return {
-            "input_ids": input_ids,
-            "attention_mask": model_inputs["attention_mask"],
-            "labels": labels,
-            "input_features": None,  # No audio features for T2T
-            "source_lang": torch.tensor(
-                [SRCLANG2ID[f["source_lang"]] for f in batch], dtype=torch.long
-            ),
-            "task_type": torch.tensor(
-                [TASKTYPE2ID["t2t"]] * len(batch), dtype=torch.long
-            ),
-        }
 
 
 class StreamingMultiTaskCollator:
@@ -427,80 +351,51 @@ class StreamingMultiTaskCollator:
     """
 
     def __init__(self, asr_collator, st_collator, t2t_collator):
-        self.asr_collator = asr_collator
-        self.st_collator = st_collator
-        self.t2t_collator = t2t_collator
+        self.task_collators = {
+            "asr": asr_collator,
+            "st": st_collator,
+            "t2t": t2t_collator,
+        }
         self.pad_id = asr_collator.pad_id
 
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
-        # Split by task
-        asr_data = [f for f in features if f["task"] == "asr"]
-        st_data = [f for f in features if f["task"] == "st"]
-        t2t_data = [f for f in features if f["task"] == "t2t"]
+        # 2. Group inputs by task (Single pass grouping)
+        task_inputs = defaultdict(list)
+        for f in features:
+            task_inputs[f["task"]].append(f)
 
-        # Process each task
-        asr_batch = self.asr_collator(asr_data) if asr_data else None
-        st_batch = self.st_collator(st_data) if st_data else None
-        t2t_batch = self.t2t_collator(t2t_data) if t2t_data else None
-
-        # Collect valid batches (non-None, non-empty)
+        # 3. Process sub-batches dynamically
         valid_batches = []
+        for task_name, collator in self.task_collators.items():
+            if task_name not in task_inputs:
+                continue
 
-        if self._is_valid_batch(asr_batch):
-            valid_batches.append(("ASR", asr_batch))
-        elif asr_data:
-            logger.debug(f"⚠️  ASR collator returned None for {len(asr_data)} samples")
+            # Run the specific collator
+            batch = collator(task_inputs[task_name])
 
-        if self._is_valid_batch(st_batch):
-            valid_batches.append(("ST", st_batch))
-        elif st_data:
-            logger.debug(f"⚠️  ST collator returned None for {len(st_data)} samples")
-
-        if self._is_valid_batch(t2t_batch):
-            valid_batches.append(("T2T", t2t_batch))
-        elif t2t_data:
-            logger.debug(f"⚠️  T2T collator returned None for {len(t2t_data)} samples")
-
-        # Handle empty case
-        if len(valid_batches) == 0:
-            logger.debug(
-                f"⏭️  All sub-batches invalid. Input: ASR={len(asr_data)}, "
-                f"ST={len(st_data)}, T2T={len(t2t_data)}"
-            )
-            return None
-
-        # Single task - return directly
-        if len(valid_batches) == 1:
-            return valid_batches[0][1]
-
-        # Multiple tasks - merge them
-        try:
-            task_names = [name for name, _ in valid_batches]
-            batches = [batch for _, batch in valid_batches]
-
-            merged = self._merge_batches(batches)
-
-            # Validate merged batch
-            expected_size = sum(b["input_ids"].size(0) for b in batches)
-            actual_size = merged["input_ids"].size(0)
-
-            if actual_size != expected_size:
-                logger.warning(
-                    f"⚠️  Merge size mismatch! Expected {expected_size}, got {actual_size}. "
-                    f"Tasks: {task_names}"
+            if self._is_valid_batch(batch):
+                valid_batches.append(batch)
+            else:
+                logger.debug(
+                    f"⚠️  {task_name.upper()} collator skipped (invalid/empty result)."
                 )
-                return None
 
-            return merged
-
-        except Exception as e:
-            logger.error(f"❌ Error merging batches: {e}")
-            import traceback
-
-            logger.debug(traceback.format_exc())
+        # 4. Handle results
+        if not valid_batches:
+            logger.debug("⏭️  All sub-batches invalid.")
             return None
 
-    def _is_valid_batch(self, batch):
+        if len(valid_batches) == 1:
+            return valid_batches[0]
+
+        try:
+            return self._merge_batches(valid_batches)
+        except Exception as e:
+            logger.error(f"❌ Error merging batches: {e}", exc_info=True)
+            return None
+
+    @staticmethod
+    def _is_valid_batch(batch):
         """Check if a batch is valid."""
         return (
             batch is not None
@@ -510,6 +405,22 @@ class StreamingMultiTaskCollator:
             and batch["input_ids"].numel() > 0
         )
 
+    @staticmethod
+    def _pad_and_concat(batches, key, fill_value, max_seq_len):
+        """
+        Helper to pad and concatenate tensors
+        """
+
+        tensors = []
+        for batch in batches:
+            tensor = batch[key]
+            if tensor.size(1) < max_seq_len:
+                tensor = torch.nn.functional.pad(
+                    tensor, (0, max_seq_len - tensor.size(1)), value=fill_value
+                )
+            tensors.append(tensor)
+        return torch.cat(tensors, dim=0)
+
     def _merge_batches(self, batches: List[Dict]) -> Dict:
         """
         Merge multiple task batches into one.
@@ -518,90 +429,56 @@ class StreamingMultiTaskCollator:
         # Find max sequence length
         max_seq_len = max(b["input_ids"].size(1) for b in batches)
 
-        # Helper to pad and concatenate tensors
-        def pad_and_concat(key, fill_value):
-            tensors = []
-            for batch in batches:
-                tensor = batch[key]
-                if tensor.size(1) < max_seq_len:
-                    tensor = torch.nn.functional.pad(
-                        tensor, (0, max_seq_len - tensor.size(1)), value=fill_value
-                    )
-                tensors.append(tensor)
-            return torch.cat(tensors, dim=0)
-
-        # Merge text tensors
         merged = {
-            "input_ids": pad_and_concat("input_ids", self.pad_id),
-            "attention_mask": pad_and_concat("attention_mask", 0),
-            "labels": pad_and_concat("labels", -100),
+            "input_ids": self._pad_and_concat(
+                batches, "input_ids", self.pad_id, max_seq_len
+            ),
+            "attention_mask": self._pad_and_concat(
+                batches, "attention_mask", 0, max_seq_len
+            ),
+            "labels": self._pad_and_concat(batches, "labels", -100, max_seq_len),
+            # Simplified audio merging call
+            "input_features": self._merge_audio_features(batches),
+            "source_lang": torch.cat([b["source_lang"] for b in batches], dim=0),
+            "task_type": torch.cat([b["task_type"] for b in batches], dim=0),
         }
-
-        # Merge audio features - this is the tricky part
-        merged["input_features"] = self._merge_audio_features(batches)
-
-        # Merge metadata
-        merged["source_lang"] = torch.cat([b["source_lang"] for b in batches], dim=0)
-        merged["task_type"] = torch.cat([b["task_type"] for b in batches], dim=0)
-
         return merged
 
     def _merge_audio_features(self, batches: List[Dict]):
         """
-        Merge audio features, handling cases where some batches have None.
-
-        Cases:
-        1. All batches have audio → concatenate
-        2. Some have audio, some None → concatenate audio + create dummy for None
-        3. All None → return None
+        Streamlined audio merger. Finds a reference tensor and fills gaps with zeros.
         """
-        # Separate batches with and without audio
-        audio_batches = []
-        non_audio_batches = []
+        # 1. Find a reference audio tensor to get shape/dtype/device
+        ref_batch = next(
+            (b for b in batches if b.get("input_features") is not None), None
+        )
 
-        for batch in batches:
-            if batch.get("input_features") is not None:
-                audio_batches.append(batch)
-            else:
-                non_audio_batches.append(batch)
-
-        # Case 3: No audio at all (all T2T)
-        if not audio_batches:
+        # Case: No audio in ANY batch (Pure Text tasks)
+        if ref_batch is None:
             return None
 
-        # Extract and validate audio shapes
-        audio_features = [b["input_features"] for b in audio_batches]
-        audio_shape = audio_features[0].shape[1:]  # (time, features) or similar
+        ref_features = ref_batch["input_features"]
+        audio_shape = ref_features.shape[1:]
 
-        # Verify all audio has same shape
-        for i, af in enumerate(audio_features):
-            if af.shape[1:] != audio_shape:
-                raise ValueError(
-                    f"Audio shape mismatch at index {i}! "
-                    f"Expected {audio_shape}, got {af.shape[1:]}"
-                )
-
-        # Case 1: All batches have audio → simple concat
-        if not non_audio_batches:
-            return torch.cat(audio_features, dim=0)
-
-        # Concatenate: real audio + dummy audio
-        # IMPORTANT: Order must match the order in merged["input_ids"]
-        # We need to interleave them correctly
-
+        # 2. Build the list, creating dummy zeros where needed
         all_features = []
         for batch in batches:
-            if batch.get("input_features") is not None:
-                all_features.append(batch["input_features"])
+            feat = batch.get("input_features")
+
+            if feat is not None:
+                # Shape validation
+                if feat.shape[1:] != audio_shape:
+                    raise ValueError(
+                        f"Audio shape mismatch! Got {feat.shape[1:]}, expected {audio_shape}"
+                    )
+                all_features.append(feat)
             else:
-                # Create dummy for this batch
-                batch_size = batch["input_ids"].size(0)
-                batch_dummy = torch.zeros(
-                    batch_size,
-                    *audio_shape,
-                    dtype=audio_features[0].dtype,
-                    device=audio_features[0].device,
+                # Create Dummy (zeros)
+                dummy = torch.zeros(
+                    (batch["input_ids"].size(0), *audio_shape),
+                    dtype=ref_features.dtype,
+                    device=ref_features.device,
                 )
-                all_features.append(batch_dummy)
+                all_features.append(dummy)
 
         return torch.cat(all_features, dim=0)
