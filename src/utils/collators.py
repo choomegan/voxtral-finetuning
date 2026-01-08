@@ -151,6 +151,13 @@ class BaseChatCollator:
 class StreamingT2TCollator(BaseChatCollator):
     TASK_ID = TASKTYPE2ID["t2t"]
 
+    def __init__(self, processor, model_id, use_task_token=False, **kwargs):
+        super().__init__(processor, model_id, **kwargs)
+        self.use_task_token = use_task_token
+        logger.info(
+            f"StreamingT2TCollator initialized (use_task_token={use_task_token})"
+        )
+
     def build_conversations(self, batch):
         conversations = []
         for entry in batch:
@@ -174,10 +181,15 @@ class StreamingSTCollator(BaseChatCollator):
 
     TASK_ID = TASKTYPE2ID["s2tt"]
 
-    def __init__(self, processor, model_id, incl_src_lang=True, **kwargs):
+    def __init__(
+        self, processor, model_id, incl_src_lang=True, use_task_token=False, **kwargs
+    ):
         super().__init__(processor, model_id, **kwargs)
-
+        self.use_task_token = use_task_token
         self.incl_src_lang = incl_src_lang
+        logger.info(
+            f"StreamingSTCollator initialized (use_task_token={use_task_token})"
+        )
 
     def build_conversations(self, batch):
         """
@@ -204,6 +216,98 @@ class StreamingSTCollator(BaseChatCollator):
         return conversations
 
 
+class StreamingLIDCollator:
+    """
+    Lightweight LID collator for task token routing.
+
+    Returns:
+    - Audio features
+    - Task token in input_ids (for routing detection)
+    - labels: Target language class IDs for classification
+    """
+
+    TASK_ID = TASKTYPE2ID["lang_id"]
+
+    def __init__(self, processor, model_id, use_task_token=True, sample_rate=16000):
+        self.processor = processor
+        self.tokenizer = processor.tokenizer
+        self.model_id = model_id
+        self.use_task_token = use_task_token
+        self.sample_rate = sample_rate
+        self.pad_id = self.tokenizer.pad_token_id
+
+        # Get task token ID
+        if use_task_token:
+            self.task_token_id = self.tokenizer.convert_tokens_to_ids("<lid>")
+            logger.info(f"StreamingLIDCollator: <lid> token ID = {self.task_token_id}")
+        else:
+            self.task_token_id = None
+
+        logger.info(
+            f"StreamingLIDCollator initialized (use_task_token={use_task_token})"
+        )
+
+    def _load_and_resample(self, audio_path):
+        """Load and resample audio."""
+        audio, sr = sf.read(audio_path)
+        if sr != self.sample_rate:
+            audio = librosa.resample(audio, orig_sr=sr, target_sr=self.sample_rate)
+        return audio
+
+    def __call__(self, features):
+        if not features:
+            return None
+
+        try:
+            batch_size = len(features)
+
+            # Load audio
+            audios = []
+            for f in features:
+                audios.append(self._load_and_resample(f["audio_path"]))
+
+            # Extract audio features
+            audio_features = self.processor.feature_extractor(
+                audios,
+                sampling_rate=self.sample_rate,
+                return_tensors="pt",
+                padding=True,
+            )
+
+            # Build minimal input_ids - just the task token for routing
+            if self.use_task_token:
+                input_ids = torch.full(
+                    (batch_size, 1), self.task_token_id, dtype=torch.long
+                )
+                attention_mask = torch.ones((batch_size, 1), dtype=torch.long)
+            else:
+                input_ids = torch.full((batch_size, 1), self.pad_id, dtype=torch.long)
+                attention_mask = torch.zeros((batch_size, 1), dtype=torch.long)
+
+            # CORRECTED: labels are the language class IDs
+            # For LID, labels = source_lang (they're the same thing!)
+            labels = torch.tensor(
+                [SRCLANG2ID[f["source_lang"]] for f in features],
+                dtype=torch.long,
+            )
+
+            return {
+                "input_ids": input_ids,  # Just task token for routing
+                "attention_mask": attention_mask,
+                "labels": labels,  # Language class IDs for classification loss
+                "input_features": audio_features.input_features,
+                # "source_lang": labels,  # Keep for compatibility with trainer logging
+                "task_type": torch.tensor(
+                    [self.TASK_ID] * batch_size,
+                    dtype=torch.long,
+                ),
+            }
+
+        except Exception as e:
+            logger.error(f"❌ Error in LID Collator: {e}")
+            return None
+
+
 class StreamingASRCollator:
     """
     Fixed ASR collator that creates labels aligned with input_ids.
@@ -211,13 +315,20 @@ class StreamingASRCollator:
     """
 
     def __init__(
-        self, processor, model_id, sample_rate=16000, lang=None, num_workers=4
+        self,
+        processor,
+        model_id,
+        sample_rate=16000,
+        lang=None,
+        use_task_token=False,
+        num_workers=4,
     ):
         self.processor = processor
         self.tokenizer = self.processor.tokenizer
         self.model_id = model_id
         self.sample_rate = sample_rate
         self.lang = lang
+        self.use_task_token = use_task_token
         self.pad_id = self.tokenizer.pad_token_id
         self.eos_id = self.tokenizer.eos_token_id
         self.num_workers = num_workers

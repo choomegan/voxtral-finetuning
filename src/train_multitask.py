@@ -157,7 +157,9 @@ def create_model(config, processor, device):
     return model
 
 
-def _initialize_collators(config, processor, model_id):
+def _initialize_collators(
+    config, processor, model_id: str, use_task_tokens: bool = False
+):
     """
     Initialize only the collators needed based on enabled tasks.
     """
@@ -173,6 +175,7 @@ def _initialize_collators(config, processor, model_id):
             model_id=model_id,
             sample_rate=16000,
             lang=None,  # Will use per-sample language from manifest
+            use_task_token=use_task_tokens,
         )
         logger.info("✅ Initialized ASR collator")
 
@@ -183,6 +186,7 @@ def _initialize_collators(config, processor, model_id):
             processor=processor,
             model_id=model_id,
             incl_src_lang=st_config.get("incl_src_lang", True),
+            use_task_token=use_task_tokens,
         )
         logger.info("✅ Initialized ST collator")
 
@@ -191,13 +195,23 @@ def _initialize_collators(config, processor, model_id):
         collators["t2t"] = StreamingT2TCollator(
             processor=processor,
             model_id=model_id,
+            use_task_token=use_task_tokens,
         )
         logger.info("✅ Initialized T2T collator")
+
+    if tasks_config.get("lid", {}).get("enabled", False):
+        collators["lid"] = StreamingT2TCollator(
+            processor=processor,
+            model_id=model_id,
+            use_task_token=use_task_tokens,
+        )
+        logger.info("✅ Initialized LID collator")
 
     multitask_collator = StreamingMultiTaskCollator(
         asr_collator=collators.get("asr"),
         st_collator=collators.get("st"),
         t2t_collator=collators.get("t2t"),
+        lid_collator=collators.get("lid"),
     )
     logger.info("✅ Initialized multi-task collator")
     return multitask_collator
@@ -276,7 +290,10 @@ def main():
 
     # --- Collators ---
     multi_collator = _initialize_collators(
-        config, processor=processor, model_id=config.model
+        config,
+        processor=processor,
+        model_id=config.model,
+        use_task_tokens=config.trainer.add_task_tokens,
     )
 
     # --- Training ---
