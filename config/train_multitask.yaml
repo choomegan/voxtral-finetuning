@@ -18,9 +18,14 @@ tasks:
   asr:
     enabled: True
   t2t:
+    enabled: True
+  lid:  
     enabled: False
 
 trainer:
+  # whether or not to add task token routing e.g. <lid>, <asr>, <t2t>, <s2tt>
+  add_task_tokens: False
+
   ### Loss manipulation
   lang_class_weighting: False
   task_uncertainty_weighting: False

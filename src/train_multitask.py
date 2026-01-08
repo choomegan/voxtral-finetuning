@@ -12,13 +12,23 @@ import wandb
 from accelerate import Accelerator
 from omegaconf import OmegaConf
 from peft import LoraConfig, get_peft_model
-from transformers import (BitsAndBytesConfig, TrainingArguments,
-                          VoxtralForConditionalGeneration, VoxtralProcessor)
+from transformers import (
+    BitsAndBytesConfig,
+    TrainingArguments,
+    VoxtralForConditionalGeneration,
+    VoxtralProcessor,
+)
 
-from utils.collators import (StreamingASRCollator, StreamingMultiTaskCollator,
-                             StreamingSTCollator, StreamingT2TCollator)
+from utils.collators import (
+    StreamingASRCollator,
+    StreamingMultiTaskCollator,
+    StreamingSTCollator,
+    StreamingT2TCollator,
+)
 from utils.dataset_utils import load_preprocessed_multitask_dataset
 from utils.train_utils import SafeTrainer
+from utils.custom_model import VoxtralWithTaskTokenRouting
+from utils.constants import SRCLANG2ID
 
 logging.basicConfig(
     level=logging.INFO,  # or DEBUG for more verbose logs
@@ -27,6 +37,124 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)  # module-level logger
+
+
+def add_task_tokens(processor):
+    """
+    Add special task tokens to the tokenizer.
+    """
+    task_tokens = ["<lid>", "<asr>", "<s2tt>", "<t2tt>"]
+
+    # Add tokens
+    num_added = processor.tokenizer.add_special_tokens(
+        {"additional_special_tokens": task_tokens}
+    )
+
+    print(f"Added {num_added} task tokens: {task_tokens}")
+
+    # Get token IDs for reference
+    task_token_ids = {
+        "lid": processor.tokenizer.convert_tokens_to_ids("<lid>"),
+        "asr": processor.tokenizer.convert_tokens_to_ids("<asr>"),
+        "s2tt": processor.tokenizer.convert_tokens_to_ids("<s2tt>"),
+        "t2tt": processor.tokenizer.convert_tokens_to_ids("<t2tt>"),
+    }
+
+    return task_token_ids
+
+
+def create_model(config, processor, device):
+    """
+    Create model with optional task token routing and LoRA.
+
+    Returns either:
+    - VoxtralWithTaskTokenRouting (with LoRA applied to base model)
+    - VoxtralForConditionalGeneration (with LoRA applied)
+    """
+    logger.info("Loading base model...")
+
+    # =========================
+    # 1. Load base Voxtral
+    # =========================
+    if config.trainer.load_in_4bit:
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16,
+        )
+        base_model = VoxtralForConditionalGeneration.from_pretrained(
+            config.model,
+            torch_dtype=torch.float16,
+            quantization_config=bnb_config,
+        )
+    else:
+        base_model = VoxtralForConditionalGeneration.from_pretrained(
+            config.model,
+            torch_dtype=torch.bfloat16 if config.trainer.bf16 else torch.float16,
+        )
+
+    # =========================
+    # 2. Apply LoRA (BEFORE wrapping)
+    # =========================
+    if getattr(config, "lora", None):
+        logger.info("🧩 Applying LoRA adapters")
+
+        lora_config = LoraConfig(
+            r=config.lora.r,
+            lora_alpha=config.lora.alpha,
+            lora_dropout=config.lora.dropout,
+            bias="none",
+            target_modules=list(config.lora.target_modules),
+            task_type="SEQ_2_SEQ_LM",
+        )
+
+        base_model = get_peft_model(base_model, lora_config)
+        base_model.enable_input_require_grads()
+
+        try:
+            base_model.print_trainable_parameters()
+        except Exception:
+            pass
+
+    # =========================
+    # 3. Task-token routing wrapper
+    # =========================
+    if config.trainer.add_task_tokens:
+        logger.info("🔀 Using task token routing approach")
+
+        # Add task tokens to tokenizer
+        task_token_ids = add_task_tokens(processor)
+
+        # Resize embeddings AFTER LoRA (safe)
+        base_model.resize_token_embeddings(len(processor.tokenizer))
+        logger.info(f"✅ Resized token embeddings to {len(processor.tokenizer)}")
+
+        model = VoxtralWithTaskTokenRouting(
+            base_model=base_model,
+            num_languages=len(SRCLANG2ID),
+            hidden_size=base_model.audio_tower.config.hidden_size,
+        )
+
+        model.set_task_token_ids(task_token_ids)
+        logger.info("✅ Initialized task token routing model")
+    else:
+        logger.info("📝 Using original prompt-based approach (no task tokens)")
+        model = base_model
+
+    # =========================
+    # 4. Freeze audio encoder
+    # =========================
+    audio_encoder = (
+        model.base_model.audio_tower
+        if hasattr(model, "base_model")
+        else model.audio_tower
+    )
+    for param in audio_encoder.parameters():
+        param.requires_grad = False
+    logger.info("✅ Froze audio encoder")
+
+    return model
 
 
 def _initialize_collators(config, processor, model_id):
@@ -143,50 +271,13 @@ def main():
         lang_weights = {lang: w / norm_factor for lang, w in lang_weights.items()}
         logger.info("Normalized language weights: %s", lang_weights)
 
+    # --- Model ---
+    model = create_model(config, processor, device)
+
     # --- Collators ---
     multi_collator = _initialize_collators(
         config, processor=processor, model_id=config.model
     )
-
-    # --- Model ---
-    logger.info("Loading model...")
-    if config.trainer.load_in_4bit:
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-        )
-
-        model = VoxtralForConditionalGeneration.from_pretrained(
-            config.model,
-            torch_dtype=torch.float16,
-            quantization_config=bnb_config,
-            # device_map={"": int(config.device_id)},  # single GPU
-        )
-    else:
-        model = VoxtralForConditionalGeneration.from_pretrained(
-            config.model,
-            torch_dtype=torch.bfloat16 if config.trainer.bf16 else torch.float16,
-            # device_map={"": int(config.device_id)},  # single GPU
-        )
-
-    # Freeze audio encoder
-    for param in model.audio_tower.parameters():
-        param.requires_grad = False
-
-    # --- LoRA ---
-    lora_config = LoraConfig(
-        r=config.lora.r,
-        lora_alpha=config.lora.alpha,
-        lora_dropout=config.lora.dropout,
-        bias="none",
-        target_modules=list(config.lora.target_modules),
-        task_type="SEQ_2_SEQ_LM",
-    )
-    model = get_peft_model(model, lora_config)
-    model.enable_input_require_grads()
-    model.print_trainable_parameters()
 
     # --- Training ---
     args = TrainingArguments(
