@@ -17,6 +17,7 @@ from transformers import (
     TrainingArguments,
     VoxtralForConditionalGeneration,
     VoxtralProcessor,
+    AutoTokenizer,
 )
 
 from utils.collators import (
@@ -24,6 +25,7 @@ from utils.collators import (
     StreamingMultiTaskCollator,
     StreamingSTCollator,
     StreamingT2TCollator,
+    StreamingLIDCollator,
 )
 from utils.dataset_utils import load_preprocessed_multitask_dataset
 from utils.train_utils import SafeTrainer
@@ -37,30 +39,6 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)  # module-level logger
-
-
-def add_task_tokens(processor):
-    """
-    Add special task tokens to the tokenizer.
-    """
-    task_tokens = ["<lid>", "<asr>", "<s2tt>", "<t2tt>"]
-
-    # Add tokens
-    num_added = processor.tokenizer.add_special_tokens(
-        {"additional_special_tokens": task_tokens}
-    )
-
-    print(f"Added {num_added} task tokens: {task_tokens}")
-
-    # Get token IDs for reference
-    task_token_ids = {
-        "lid": processor.tokenizer.convert_tokens_to_ids("<lid>"),
-        "asr": processor.tokenizer.convert_tokens_to_ids("<asr>"),
-        "s2tt": processor.tokenizer.convert_tokens_to_ids("<s2tt>"),
-        "t2tt": processor.tokenizer.convert_tokens_to_ids("<t2tt>"),
-    }
-
-    return task_token_ids
 
 
 def create_model(config, processor, device):
@@ -120,15 +98,8 @@ def create_model(config, processor, device):
     # =========================
     # 3. Task-token routing wrapper
     # =========================
-    if config.trainer.add_task_tokens:
-        logger.info("🔀 Using task token routing approach")
-
-        # Add task tokens to tokenizer
-        task_token_ids = add_task_tokens(processor)
-
-        # Resize embeddings AFTER LoRA (safe)
-        base_model.resize_token_embeddings(len(processor.tokenizer))
-        logger.info(f"✅ Resized token embeddings to {len(processor.tokenizer)}")
+    if config.trainer.use_task_routing:
+        logger.info("🔀 Using task routing approach")
 
         model = VoxtralWithTaskTokenRouting(
             base_model=base_model,
@@ -136,8 +107,7 @@ def create_model(config, processor, device):
             hidden_size=base_model.audio_tower.config.hidden_size,
         )
 
-        model.set_task_token_ids(task_token_ids)
-        logger.info("✅ Initialized task token routing model")
+        logger.info("✅ Initialized task routing model")
     else:
         logger.info("📝 Using original prompt-based approach (no task tokens)")
         model = base_model
@@ -157,9 +127,7 @@ def create_model(config, processor, device):
     return model
 
 
-def _initialize_collators(
-    config, processor, model_id: str, use_task_tokens: bool = False
-):
+def _initialize_collators(config, processor, model_id: str):
     """
     Initialize only the collators needed based on enabled tasks.
     """
@@ -175,7 +143,6 @@ def _initialize_collators(
             model_id=model_id,
             sample_rate=16000,
             lang=None,  # Will use per-sample language from manifest
-            use_task_token=use_task_tokens,
         )
         logger.info("✅ Initialized ASR collator")
 
@@ -186,7 +153,6 @@ def _initialize_collators(
             processor=processor,
             model_id=model_id,
             incl_src_lang=st_config.get("incl_src_lang", True),
-            use_task_token=use_task_tokens,
         )
         logger.info("✅ Initialized ST collator")
 
@@ -195,15 +161,13 @@ def _initialize_collators(
         collators["t2t"] = StreamingT2TCollator(
             processor=processor,
             model_id=model_id,
-            use_task_token=use_task_tokens,
         )
         logger.info("✅ Initialized T2T collator")
 
     if tasks_config.get("lid", {}).get("enabled", False):
-        collators["lid"] = StreamingT2TCollator(
+        collators["lid"] = StreamingLIDCollator(
             processor=processor,
             model_id=model_id,
-            use_task_token=use_task_tokens,
         )
         logger.info("✅ Initialized LID collator")
 
@@ -245,24 +209,32 @@ def main():
     # --- Processor ---
     logger.info("Loading processor...")
     processor = VoxtralProcessor.from_pretrained(config.model)
+    tokenizer = AutoTokenizer.from_pretrained(config.model, trust_remote_code=True)
+    processor.tokenizer = tokenizer
 
     # Load preprocessed datasets (this caches to disk)
     logger.info("Loading or creating preprocessed datasets...")
-    train_dataset, eval_dataset_asr, eval_dataset_st, eval_dataset_t2t = (
-        load_preprocessed_multitask_dataset(
-            train_manifest=config.data.train_manifest,
-            eval_manifest=config.data.eval_manifest,
-            incl_asr=config.tasks.asr.enabled,
-            incl_s2tt=config.tasks.s2tt.enabled,
-            incl_t2t=config.tasks.t2t.enabled,
-        )
+    (
+        train_dataset,
+        eval_dataset_asr,
+        eval_dataset_st,
+        eval_dataset_t2t,
+        eval_dataset_lid,
+    ) = load_preprocessed_multitask_dataset(
+        train_manifest=config.data.train_manifest,
+        eval_manifest=config.data.eval_manifest,
+        incl_asr=config.tasks.asr.enabled,
+        incl_s2tt=config.tasks.s2tt.enabled,
+        incl_t2t=config.tasks.t2t.enabled,
+        incl_lid=config.tasks.lid.enabled,
     )
 
     logger.info(
-        "Eval dataset sizes — ASR: %s, ST: %s, T2T: %s",
+        "Eval dataset sizes — ASR: %s, ST: %s, T2T: %s, LID: %s",
         len(eval_dataset_asr) if eval_dataset_asr else "N/A",
         len(eval_dataset_st) if eval_dataset_st else "N/A",
         len(eval_dataset_t2t) if eval_dataset_t2t else "N/A",
+        len(eval_dataset_lid) if eval_dataset_lid else "N/A",
     )
 
     # --- Compute language weights ---
@@ -293,7 +265,6 @@ def main():
         config,
         processor=processor,
         model_id=config.model,
-        use_task_tokens=config.trainer.add_task_tokens,
     )
 
     # --- Training ---

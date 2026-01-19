@@ -2,8 +2,8 @@ model: mistralai/Voxtral-Mini-3B-2507
 device_id: 0
 
 data:
-  train_manifest: /home/pumba-04/Desktop/MEGAN/datasets/MOOFOO_S2TT/ms_id_train_manifest_multitask.json
-  eval_manifest: /home/pumba-04/Desktop/MEGAN/datasets/MOOFOO_S2TT/ms_id_validation_manifest_multitask.json
+  train_manifest: /mnt/d/MEGAN/data/moofoo_s2tt/ms/testing_updated.json
+  eval_manifest: /mnt/d/MEGAN/data/moofoo_s2tt/ms/testing_updated.json
 
 lora:
   r: 8
@@ -20,11 +20,11 @@ tasks:
   t2t:
     enabled: True
   lid:  
-    enabled: False
+    enabled: True
 
 trainer:
   # whether or not to add task token routing e.g. <lid>, <asr>, <t2t>, <s2tt>
-  add_task_tokens: False
+  use_task_routing: True
 
   ### Loss manipulation
   lang_class_weighting: False
@@ -35,25 +35,25 @@ trainer:
   use_pcgrad: False
   pcgrad_reduction: "mean"
 
-  epochs: 4
+  epochs: 3
   lr: 5e-5
   grad_accum: 4
   train_batch_size: 2
   eval_batch_size: 2
   logging_steps: 2
-  save_steps: 1000
-  eval_steps: 1000
+  save_steps: 10
+  eval_steps: 10
   warmup_steps: 500
-  eval_on_start: True
+  eval_on_start: False
   load_in_4bit: False
   bf16: True
   save_total_limit: 2
   resume_from_checkpoint: null # ckpt folder or null
 
 exp_manager:
-  name: s2tt_asr_multitask
+  name: TEST_MULTITASK_T2T
   exp_dir: experiments
-  logger: wandb # wandb or tensorboard
+  logger: tensorboard # wandb or tensorboard
   wandb:
     project: voxtral-finetuning-multitask
     run_id: null # only used for resuming runs

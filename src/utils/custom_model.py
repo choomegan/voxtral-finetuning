@@ -7,6 +7,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from utils.constants import TASKTYPE2ID
 
 logging.basicConfig(
     level=logging.INFO,  # or DEBUG for more verbose logs
@@ -29,6 +30,8 @@ class VoxtralWithTaskTokenRouting(nn.Module):
     def __init__(self, base_model, num_languages, hidden_size):
         super().__init__()
         self.base_model = base_model
+        self.lid_loss_weight = 0.3  # FIXME: to be customised next time
+        self.gen_loss_weight = 1.0
 
         # LID classification head
         self.lid_head = nn.Sequential(
@@ -47,46 +50,6 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         self.task_token_ids = task_token_ids
         logger.info(f"Task token IDs set: {task_token_ids}")
 
-    def detect_task_from_tokens(self, input_ids):
-        """
-        Detect task type from input_ids by looking for task tokens.
-
-        Returns:
-            task_mask: Boolean tensor [batch_size] indicating which samples are each task
-        """
-        batch_size = input_ids.size(0)
-
-        # Create masks for each task
-        lid_mask = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
-        asr_mask = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
-        st_mask = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
-        t2t_mask = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
-
-        for i in range(batch_size):
-            # Check if any task token appears in this sample
-            sample_tokens = input_ids[i]
-
-            if self.task_token_ids["lid"] in sample_tokens:
-                lid_mask[i] = True
-            elif self.task_token_ids["asr"] in sample_tokens:
-                asr_mask[i] = True
-            elif self.task_token_ids["s2tt"] in sample_tokens:
-                st_mask[i] = True
-            elif self.task_token_ids["t2tt"] in sample_tokens:
-                t2t_mask[i] = True
-            else:
-                # Fallback: if no task token found, assume generative task
-                # You could also raise an error here
-                logger.warning(f"No task token found in sample {i}, defaulting to ASR")
-                asr_mask[i] = True
-
-        return {
-            "lid": lid_mask,
-            "asr": asr_mask,
-            "st": st_mask,
-            "t2t": t2t_mask,
-        }
-
     def forward(
         self,
         input_features=None,
@@ -94,6 +57,7 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         attention_mask=None,
         labels=None,
         source_lang=None,  # Ground truth for LID
+        task_type=None,
         **kwargs,
     ):
         """
@@ -101,10 +65,12 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         """
 
         # Detect task from input_ids
-        task_masks = self.detect_task_from_tokens(input_ids)
-
-        lid_mask = task_masks["lid"]
-        gen_mask = task_masks["asr"] | task_masks["st"] | task_masks["t2t"]
+        lid_mask = task_type == TASKTYPE2ID["lid"]
+        gen_mask = (
+            (task_type == TASKTYPE2ID["asr"])
+            | (task_type == TASKTYPE2ID["s2tt"])
+            | (task_type == TASKTYPE2ID["t2tt"])
+        )
 
         has_lid = lid_mask.any().item()
         has_gen = gen_mask.any().item()
@@ -169,7 +135,10 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         # Combine losses
         # ====================================
         if has_lid and has_gen:
-            outputs["loss"] = outputs["lid_loss"] + outputs["gen_loss"]
+            outputs["loss"] = (
+                self.lid_loss_weight * outputs["lid_loss"]
+                + self.gen_loss_weight * outputs["gen_loss"]
+            )
         elif has_lid:
             outputs["loss"] = outputs["lid_loss"]
         else:
@@ -183,15 +152,13 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         input_ids=None,
         input_features=None,
         attention_mask=None,
+        task_type=None,
         **generation_kwargs,
     ):
         """
         Override generate to handle LID classification vs text generation.
         """
-        # Detect task from input_ids
-        task_masks = self.detect_task_from_tokens(input_ids)
-
-        lid_mask = task_masks["lid"]
+        lid_mask = task_type == TASKTYPE2ID["lid"]
 
         # If all samples are LID, do classification instead of generation
         if lid_mask.all():
