@@ -33,14 +33,20 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         self.lid_loss_weight = 0.3  # FIXME: to be customised next time
         self.gen_loss_weight = 1.0
 
+        # Determine dtype from base model
+        base_dtype = next(base_model.parameters()).dtype
+        logger.info(f"Base model dtype: {base_dtype}")
+
         # LID classification head
         self.lid_head = nn.Sequential(
             nn.Dropout(0.1),
-            nn.Linear(hidden_size, hidden_size),
+            nn.Linear(hidden_size, hidden_size, dtype=base_dtype),
             nn.GELU(),
             nn.Dropout(0.1),
-            nn.Linear(hidden_size, num_languages),
+            nn.Linear(hidden_size, num_languages, dtype=base_dtype),
         )
+
+        logger.info(f"Initialized LID head with dtype: {base_dtype}")
 
         # Store task token IDs for routing
         self.task_token_ids = None  # Will be set after tokenizer is ready
