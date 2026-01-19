@@ -306,6 +306,7 @@ def main():
             "asr": eval_dataset_asr,
             "st": eval_dataset_st,
             "t2t": eval_dataset_t2t,
+            "lid": eval_dataset_lid,
         },
         data_collator=multi_collator,
         lang_weight_map=lang_weights if config.trainer.lang_class_weighting else None,

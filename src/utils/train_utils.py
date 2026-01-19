@@ -7,13 +7,14 @@ Clean Trainer implementation with proper separation of concerns:
 
 import logging
 import traceback
+from typing import Dict
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import Trainer
 
-from utils.constants import SRCLANG2ID, TASKTYPE2ID
+from utils.constants import SRCLANG2ID, TASKTYPE2ID, ID2SRCLANG
 from utils.pcgrad import PCGrad
 
 logger = logging.getLogger(__name__)
@@ -494,6 +495,103 @@ class SafeTrainer(Trainer):
             return loss.detach() / self.args.gradient_accumulation_steps
         return loss.detach()
 
+    def _evaluate_lid(
+        self, model, dataset, metric_key_prefix: str = "eval_lid"
+    ) -> Dict[str, float]:
+        """
+        Custom evaluation for LID classification task.
+
+        Returns accuracy and loss metrics instead of generation metrics.
+        """
+        model.eval()
+
+        # Create dataloader for LID dataset
+        dataloader = self.get_eval_dataloader(dataset)
+
+        total_samples = 0
+        total_correct = 0
+        total_loss = 0.0
+        num_batches = 0
+
+        # Per-language accuracy tracking
+        lang_correct = {lang_id: 0 for lang_id in range(len(SRCLANG2ID))}
+        lang_total = {lang_id: 0 for lang_id in range(len(SRCLANG2ID))}
+
+        logger.info(f"🔍 Evaluating LID: {len(dataset)} samples")
+
+        with torch.no_grad():
+            for batch in dataloader:
+                if batch is None:
+                    continue
+
+                # Move to device
+                batch = self._prepare_inputs(batch)
+
+                # Forward pass
+                outputs = model(**batch)
+
+                # Get predictions and ground truth
+                lid_logits = outputs.get("lid_logits")
+                if lid_logits is None:
+                    logger.warning("⚠️ No lid_logits in model output")
+                    continue
+
+                predictions = lid_logits.argmax(dim=-1)  # [B]
+                targets = batch["source_lang"]  # [B]
+                for i, (pred, tgt) in enumerate(zip(predictions, targets)):
+                    pred_lang = ID2SRCLANG.get(pred.item(), "UNKNOWN")
+                    tgt_lang = ID2SRCLANG.get(tgt.item(), "UNKNOWN")
+                    logger.info(
+                        f"Sample {i}: pred={pred_lang}({pred.item()}), target={tgt_lang}({tgt.item()})"
+                    )
+
+                # Compute metrics
+                correct = (predictions == targets).sum().item()
+                total_correct += correct
+                total_samples += len(targets)
+
+                # Per-language accuracy
+                for pred, target in zip(
+                    predictions.cpu().numpy(), targets.cpu().numpy()
+                ):
+                    lang_total[target] += 1
+                    if pred == target:
+                        lang_correct[target] += 1
+
+                # Accumulate loss
+                if "lid_loss" in outputs:
+                    total_loss += outputs["lid_loss"].item()
+                    num_batches += 1
+
+        # Compute overall accuracy
+        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
+        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+
+        # Compute per-language accuracy
+        id2lang = {v: k for k, v in SRCLANG2ID.items()}
+        lang_accuracies = {}
+        for lang_id, total in lang_total.items():
+            if total > 0:
+                lang_name = id2lang.get(lang_id, f"lang_{lang_id}")
+                acc = lang_correct[lang_id] / total
+                lang_accuracies[f"{metric_key_prefix}_acc_{lang_name}"] = acc
+
+        # Return metrics
+        metrics = {
+            f"{metric_key_prefix}_loss": avg_loss,
+            f"{metric_key_prefix}_accuracy": accuracy,
+            f"{metric_key_prefix}_samples": total_samples,
+        }
+
+        # Add per-language accuracies
+        metrics.update(lang_accuracies)
+
+        logger.info(
+            f"✓ LID Evaluation: Accuracy={accuracy:.4f}, Loss={avg_loss:.4f}, Samples={total_samples}"
+        )
+
+        return metrics
+
     def evaluate(self, eval_dataset=None, **kwargs):
         """Handle dict of eval datasets."""
         if isinstance(self.eval_dataset, dict):
@@ -511,19 +609,42 @@ class SafeTrainer(Trainer):
                 self.total_eval_batches = 0
 
                 try:
-                    res = super().evaluate(
-                        eval_dataset=dataset,
-                        metric_key_prefix=f"eval_{name}",
-                        **kwargs,
-                    )
+                    # ============================================
+                    # LID: Use custom classification evaluation
+                    # ============================================
+                    if name == "lid":
+                        res = self._evaluate_lid(
+                            self.model, dataset, metric_key_prefix=f"eval_{name}"
+                        )
+                        flat_metrics.update(res)
 
-                    # 🔑 Flatten metrics so Trainer can see them
-                    flat_metrics.update(res)
+                        # Extract loss for combined metric
+                        loss_key = f"eval_{name}_loss"
+                        if loss_key in res:
+                            losses[name] = res[loss_key]
 
-                    # Extract per-task loss
-                    loss_key = f"eval_{name}_loss"
-                    if loss_key in res:
-                        losses[name] = res[loss_key]
+                        # ✅ CRITICAL FIX: Explicitly log LID metrics
+                        if hasattr(self, "log"):
+                            # Log to WandB/TensorBoard
+                            self.log(res)
+
+                    # ============================================
+                    # Generative tasks: Use standard evaluation
+                    # ============================================
+                    else:
+                        res = super().evaluate(
+                            eval_dataset=dataset,
+                            metric_key_prefix=f"eval_{name}",
+                            **kwargs,
+                        )
+
+                        # 🔑 Flatten metrics so Trainer can see them
+                        flat_metrics.update(res)
+
+                        # Extract per-task loss
+                        loss_key = f"eval_{name}_loss"
+                        if loss_key in res:
+                            losses[name] = res[loss_key]
 
                     if self.skipped_batches_eval > 0:
                         skip_pct = (
