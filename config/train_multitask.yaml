@@ -23,8 +23,8 @@ tasks:
     enabled: True
 
 trainer:
-  # whether or not to add task token routing e.g. <lid>, <asr>, <t2t>, <s2tt>
-  use_task_routing: True
+  # Whether or not to add task routing in trainer. Need to set to True for LID.
+  use_task_routing: False
 
   ### Loss manipulation
   lang_class_weighting: False
