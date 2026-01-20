@@ -13,6 +13,7 @@ from utils.preprocess_utils import (
     preprocess_t2t_dataset,
     preprocess_lid_dataset,
 )
+from utils.constants import SRCLANG2ID
 
 logger = logging.getLogger(__name__)  # module-level logger
 
@@ -336,4 +337,36 @@ def load_eval_st_manifest_dataset(manifest_path: str) -> Dataset:
         len(dataset),
         manifest_path,
     )
+    return dataset
+
+
+def load_eval_lid_manifest_dataset(manifest_path: str) -> Dataset:
+    logger.info("Loading LID eval dataset from: %s", manifest_path)
+    root_dir = os.path.dirname(os.path.abspath(manifest_path))
+    data = []
+
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        for line in f:
+            entry = json.loads(line.strip())
+
+            # ---- Fix audio path ----
+            audio_path = entry["source"]["audio_local_path"]
+            if not os.path.isabs(audio_path):
+                audio_path = os.path.join(root_dir, audio_path)
+            entry["source"]["audio_local_path"] = os.path.normpath(audio_path)
+
+            # ---- Create numeric LID label ----
+            src_lang = entry["source"]["lang"]
+            entry["source"]["lang_id"] = SRCLANG2ID[src_lang]
+
+            data.append(entry)
+
+    dataset = Dataset.from_list(data)
+
+    # Flatten nested fields
+    dataset = dataset.flatten()
+
+    logger.info("Columns: %s", dataset.column_names)
+    logger.info("Loaded %d samples from %s", len(dataset), manifest_path)
+
     return dataset
