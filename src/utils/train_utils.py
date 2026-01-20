@@ -5,9 +5,10 @@ Clean Trainer implementation with proper separation of concerns:
 - No code duplication
 """
 
+import os
 import logging
 import traceback
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -16,6 +17,7 @@ from transformers import Trainer
 
 from utils.constants import SRCLANG2ID, TASKTYPE2ID, ID2SRCLANG
 from utils.pcgrad import PCGrad
+from utils.custom_model import VoxtralWithTaskTokenRouting
 
 logger = logging.getLogger(__name__)
 
@@ -541,7 +543,7 @@ class SafeTrainer(Trainer):
                 for i, (pred, tgt) in enumerate(zip(predictions, targets)):
                     pred_lang = ID2SRCLANG.get(pred.item(), "UNKNOWN")
                     tgt_lang = ID2SRCLANG.get(tgt.item(), "UNKNOWN")
-                    logger.info(
+                    logger.debug(
                         f"Sample {i}: pred={pred_lang}({pred.item()}), target={tgt_lang}({tgt.item()})"
                     )
 
@@ -718,3 +720,112 @@ class SafeTrainer(Trainer):
         return super().prediction_step(
             model, inputs, prediction_loss_only, ignore_keys=ignore_keys
         )
+
+    def _save(self, output_dir: Optional[str] = None, state_dict=None):
+        """
+        Override internal _save to handle task routing wrapper with PEFT.
+
+        This prevents saving the full 9GB model when using LoRA.
+        """
+        output_dir = output_dir if output_dir is not None else self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Get the actual model (unwrap DDP/FSDP)
+        model_to_save = self.model
+        if hasattr(model_to_save, "module"):
+            model_to_save = model_to_save.module
+
+        # =========================
+        # Handle Task Routing Wrapper
+        # =========================
+        if isinstance(model_to_save, VoxtralWithTaskTokenRouting):
+            logger.info("📦 Saving task routing model with LoRA adapters...")
+
+            base_model = model_to_save.base_model
+
+            # Check if base model is a PEFT model
+            if hasattr(base_model, "save_pretrained") and hasattr(
+                base_model, "peft_config"
+            ):
+                # This is a PeftModel - save only adapters
+                logger.info("✅ Detected PEFT model - saving adapters only")
+                base_model.save_pretrained(output_dir)
+
+                # Save LID head separately
+                if hasattr(base_model, "base_model") and hasattr(
+                    base_model.base_model.model, "lid_head"
+                ):
+                    lid_head = base_model.base_model.model.lid_head
+                    if lid_head is not None:
+                        lid_head_path = os.path.join(output_dir, "lid_head.pt")
+                        torch.save(lid_head.state_dict(), lid_head_path)
+                        logger.info(
+                            f"✅ Saved LID head ({os.path.getsize(lid_head_path) / 1e6:.1f}MB)"
+                        )
+            else:
+                # Not a PEFT model - save full model
+                logger.warning("⚠️ Base model is not a PEFT model - saving full weights")
+                base_model.save_pretrained(output_dir)
+
+            # Save task routing marker
+            marker_path = os.path.join(output_dir, "task_routing.txt")
+            with open(marker_path, "w") as f:
+                f.write("VoxtralWithTaskTokenRouting\n")
+                f.write(f"lid_loss_weight: {model_to_save.lid_loss_weight}\n")
+                f.write(f"gen_loss_weight: {model_to_save.gen_loss_weight}\n")
+            logger.info(f"✅ Saved task routing marker")
+
+        # =========================
+        # Handle Direct PEFT Model
+        # =========================
+        elif hasattr(model_to_save, "save_pretrained") and hasattr(
+            model_to_save, "peft_config"
+        ):
+            logger.info("📦 Saving PEFT model (adapters only)...")
+            model_to_save.save_pretrained(output_dir)
+
+            # Save LID head if present
+            if hasattr(model_to_save, "base_model") and hasattr(
+                model_to_save.base_model.model, "lid_head"
+            ):
+                lid_head = model_to_save.base_model.model.lid_head
+                if lid_head is not None:
+                    lid_head_path = os.path.join(output_dir, "lid_head.pt")
+                    torch.save(lid_head.state_dict(), lid_head_path)
+                    logger.info(
+                        f"✅ Saved LID head ({os.path.getsize(lid_head_path) / 1e6:.1f}MB)"
+                    )
+
+        # =========================
+        # Fallback to Default Saving
+        # =========================
+        else:
+            logger.info("📦 Saving full model (not PEFT)...")
+            super()._save(output_dir, state_dict)
+
+        # Log checkpoint size
+        total_size = sum(
+            os.path.getsize(os.path.join(output_dir, f))
+            for f in os.listdir(output_dir)
+            if os.path.isfile(os.path.join(output_dir, f))
+        )
+        logger.info(f"💾 Checkpoint size: {total_size / 1e6:.1f}MB")
+
+    def save_model(self, output_dir: Optional[str] = None, _internal_call=False):
+        """
+        Override save_model to use our custom _save logic.
+        """
+        if output_dir is None:
+            output_dir = self.args.output_dir
+
+        # Call our custom _save
+        self._save(output_dir)
+
+        # Save trainer state (required by Trainer)
+        if self.args.should_save:
+            # Save tokenizer/processor
+            if self.tokenizer is not None:
+                self.tokenizer.save_pretrained(output_dir)
+
+            # Save training args
+            torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
