@@ -7,6 +7,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import VoxtralForConditionalGeneration
 from utils.constants import TASKTYPE2ID
 
 logging.basicConfig(
@@ -18,9 +19,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)  # module-level logger
 
 
+class VoxtralForConditionalGenerationWithLID(VoxtralForConditionalGeneration):
+    """Extends Voxtral to optionally include LID classification head."""
+
+    def __init__(self, config, num_languages=None):
+        super().__init__(config)
+
+        if num_languages is not None:
+            hidden_size = self.audio_tower.config.hidden_size
+            self.lid_head = nn.Sequential(
+                nn.Dropout(0.1),
+                nn.Linear(hidden_size, hidden_size),
+                nn.GELU(),
+                nn.Dropout(0.1),
+                nn.Linear(hidden_size, num_languages),
+            )
+            logger.info(f"✅ Initialized LID head with {num_languages} classes")
+        else:
+            self.lid_head = None
+
+    def save_pretrained(self, save_directory, **kwargs):
+        """Override to ensure LID head is saved."""
+        super().save_pretrained(save_directory, **kwargs)
+        logger.info("✅ Saved model with LID head")
+
+
 class VoxtralWithTaskTokenRouting(nn.Module):
     """
-    Voxtral with task token-based routing.
+    Voxtral with task routing.
 
     - Detects task token in input_ids
     - Routes LID to classification head
@@ -33,23 +59,12 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         self.lid_loss_weight = 0.3  # FIXME: to be customised next time
         self.gen_loss_weight = 1.0
 
-        # Determine dtype from base model
-        base_dtype = next(base_model.parameters()).dtype
-        logger.info(f"Base model dtype: {base_dtype}")
+        # Use LID head from base model
+        assert (
+            hasattr(base_model, "lid_head") and base_model.lid_head is not None
+        ), "Base model must have lid_head for task routing"
 
-        # LID classification head
-        self.lid_head = nn.Sequential(
-            nn.Dropout(0.1),
-            nn.Linear(hidden_size, hidden_size, dtype=base_dtype),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_size, num_languages, dtype=base_dtype),
-        )
-
-        logger.info(f"Initialized LID head with dtype: {base_dtype}")
-
-        # Store task token IDs for routing
-        self.task_token_ids = None  # Will be set after tokenizer is ready
+        logger.info("✅ Using LID head from VoxtralForConditionalGenerationWithLID")
 
     def set_task_token_ids(self, task_token_ids):
         """Set task token IDs after tokenizer initialization."""
@@ -81,7 +96,15 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         has_lid = lid_mask.any().item()
         has_gen = gen_mask.any().item()
 
-        outputs = {}
+        # ✅ CRITICAL FIX: Initialize ALL possible keys upfront
+        # This ensures DataParallel can gather outputs from all GPUs
+        outputs = {
+            "loss": None,
+            "lid_loss": None,
+            "lid_logits": None,
+            "gen_loss": None,
+            "logits": None,
+        }
 
         # ====================================
         # Route 1: LID Classification
@@ -100,7 +123,9 @@ class VoxtralWithTaskTokenRouting(nn.Module):
             pooled_features = audio_features.mean(dim=1)  # [B_lid, H]
 
             # Classification
-            lid_logits = self.lid_head(pooled_features)  # [B_lid, num_languages]
+            lid_logits = self.base_model.lid_head(
+                pooled_features
+            )  # [B_lid, num_languages]
 
             # Compute loss if labels provided
             if source_lang is not None:
@@ -108,7 +133,6 @@ class VoxtralWithTaskTokenRouting(nn.Module):
                 lid_loss = F.cross_entropy(lid_logits, lid_labels)
                 outputs["lid_loss"] = lid_loss
                 outputs["lid_logits"] = lid_logits
-                outputs["lid_indices"] = lid_indices
 
         # ====================================
         # Route 2: Generative Tasks
@@ -135,7 +159,6 @@ class VoxtralWithTaskTokenRouting(nn.Module):
 
             outputs["gen_loss"] = gen_outputs.loss
             outputs["logits"] = gen_outputs.logits
-            outputs["gen_indices"] = gen_indices
 
         # ====================================
         # Combine losses
@@ -172,7 +195,7 @@ class VoxtralWithTaskTokenRouting(nn.Module):
             audio_outputs = self.base_model.audio_tower(input_features)
             audio_features = audio_outputs.last_hidden_state
             pooled_features = audio_features.mean(dim=1)
-            lid_logits = self.lid_head(pooled_features)
+            lid_logits = self.base_model.lid_head(pooled_features)
 
             # Return predicted class IDs (mimicking generated token IDs)
             pred_classes = lid_logits.argmax(dim=-1, keepdim=True)  # [B, 1]
