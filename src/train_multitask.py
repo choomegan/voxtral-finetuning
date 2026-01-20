@@ -1,5 +1,5 @@
 """
-Multitask finetuning for ASR and ST
+Multitask finetuning for ASR,, ST, T2T, and LID
 """
 
 import logging
@@ -29,7 +29,10 @@ from utils.collators import (
 )
 from utils.dataset_utils import load_preprocessed_multitask_dataset
 from utils.train_utils import SafeTrainer
-from utils.custom_model import VoxtralWithTaskTokenRouting
+from utils.custom_model import (
+    VoxtralWithTaskTokenRouting,
+    VoxtralForConditionalGenerationWithLID,
+)
 from utils.constants import SRCLANG2ID
 
 logging.basicConfig(
@@ -54,6 +57,9 @@ def create_model(config, processor, device):
     # =========================
     # 1. Load base Voxtral
     # =========================
+    # Load with LID head if task routing is enabled
+    num_languages = len(SRCLANG2ID) if config.tasks.lid.enabled else None
+
     if config.trainer.load_in_4bit:
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
@@ -67,10 +73,18 @@ def create_model(config, processor, device):
             quantization_config=bnb_config,
         )
     else:
-        base_model = VoxtralForConditionalGeneration.from_pretrained(
-            config.model,
-            torch_dtype=torch.bfloat16 if config.trainer.bf16 else torch.float16,
-        )
+        # if LID is included in the tasks
+        if config.tasks.lid.enabled:
+            base_model = VoxtralForConditionalGenerationWithLID.from_pretrained(
+                config.model,
+                torch_dtype=torch.bfloat16 if config.trainer.bf16 else torch.float16,
+                num_languages=num_languages,
+            )
+        else:
+            base_model = VoxtralForConditionalGeneration.from_pretrained(
+                config.model,
+                torch_dtype=torch.bfloat16 if config.trainer.bf16 else torch.float16,
+            )
 
     # =========================
     # 2. Apply LoRA (BEFORE wrapping)
@@ -111,6 +125,12 @@ def create_model(config, processor, device):
     else:
         logger.info("📝 Using original prompt-based approach (no task tokens)")
         model = base_model
+
+    # NEED TO UNFREEZE TASK SPECIFI HEADS! Peft will freeze the whole base model automatically
+    if hasattr(model, "base_model") and hasattr(model.base_model, "lid_head"):
+        for p in model.base_model.lid_head.parameters():
+            p.requires_grad = True
+        logger.info("✅ LID head is trainable")
 
     # =========================
     # 4. Freeze audio encoder
