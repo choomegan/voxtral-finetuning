@@ -8,13 +8,13 @@ import os
 
 import torch
 from omegaconf import OmegaConf
-from peft import PeftModel
 from sacrebleu.metrics import BLEU
 from tqdm import tqdm
-from transformers import VoxtralForConditionalGeneration, VoxtralProcessor
+from transformers import VoxtralProcessor
 
 from utils.chat_template_utils import build_t2t_prompt_no_src_lang
 from utils.dataset_utils import load_eval_st_manifest_dataset
+from utils.eval_helper import load_model_for_evaluation
 
 logging.basicConfig(
     level=logging.INFO,  # or DEBUG for more verbose logs
@@ -31,6 +31,7 @@ def translate_sample(
     src_text: str,
     device: torch.device,
     src_lang: str = None,
+    is_task_routing: bool = False,
 ):
     """
     Run speech translation inference on one audio sample using the path-based
@@ -80,12 +81,20 @@ def translate_sample(
             )
 
         # 5. Generate
-        generated_tokens = model.generate(
-            **generate_inputs,
-            max_new_tokens=256,
-            do_sample=False,
-            num_beams=1,
-        )
+        if is_task_routing:
+            generated_tokens = model.base_model.generate(
+                **generate_inputs,
+                max_new_tokens=256,
+                do_sample=False,
+                num_beams=1,
+            )
+        else:
+            generated_tokens = model.generate(
+                **generate_inputs,
+                max_new_tokens=256,
+                do_sample=False,
+                num_beams=1,
+            )
 
         # 4. Decode the results
         # CRITICAL STEP: Slice off the prompt tokens (input_ids.shape[1])
@@ -115,26 +124,8 @@ def main():
     logger.info("Loading processor and base model: %s", config.model)
     processor = VoxtralProcessor.from_pretrained(config.model)
 
-    # Use bfloat16 precision if CUDA is available for memory efficiency
-    base_model = VoxtralForConditionalGeneration.from_pretrained(
-        config.model,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-    ).to(device)
-
-    # Load LoRA adapter if available (common for finetuning)
-    adapter_config = os.path.join(config.checkpoint_path, "adapter_config.json")
-    if os.path.exists(adapter_config):
-        logger.info(
-            "Detected LoRA adapter at %s — loading it...", config.checkpoint_path
-        )
-        # Use PeftModel to wrap the base model with the adapter weights
-        model = PeftModel.from_pretrained(base_model, config.checkpoint_path)
-    else:
-        logger.info("No adapter_config.json found — assuming full model checkpoint.")
-        model = base_model
-
-    # Set model to evaluation mode (disables dropout, etc.)
-    model.eval()
+    # Load Model (handles all checkpoint types)
+    model, is_task_routing = load_model_for_evaluation(config, device, logger)
 
     # Load dataset. Note: The dataset now contains the 'audio_path' column.
     dataset = load_eval_st_manifest_dataset(config.manifest)
@@ -166,6 +157,7 @@ def main():
                 src_text=src_text,
                 device=device,
                 src_lang=None,
+                is_task_routing=is_task_routing,
             )
 
             # Collect results for corpus-level metrics

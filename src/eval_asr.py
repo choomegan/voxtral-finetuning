@@ -3,20 +3,37 @@ Evaluation script for ASR task
 """
 
 import json
+import logging
 import os
 
 import jiwer
 import torch
 from omegaconf import OmegaConf
-from peft import PeftModel
 from tqdm import tqdm
-from transformers import VoxtralForConditionalGeneration, VoxtralProcessor
+from transformers import VoxtralProcessor
 
 from utils.constants import LANGCODE_MAP
 from utils.dataset_utils import load_eval_asr_manifest_dataset
+from utils.eval_helper import load_model_for_evaluation
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+logger = logging.getLogger(__name__)
 
 
-def transcribe_batch(model, base_model_name, processor, audio_batch, lang, device):
+def transcribe_sample(
+    model,
+    base_model_name: str,
+    processor: VoxtralProcessor,
+    audio_batch,
+    lang: str,
+    device: torch.device,
+    is_task_routing: bool = False,
+):
     """
     Run inference on a batch of audio clips.
     """
@@ -28,12 +45,20 @@ def transcribe_batch(model, base_model_name, processor, audio_batch, lang, devic
             model_id=base_model_name,
         ).to(device)
 
-        generated_tokens = model.generate(
-            **inputs,
-            max_new_tokens=256,
-            do_sample=False,
-            num_beams=1,
-        )
+        if is_task_routing:
+            generated_tokens = model.base_model.generate(
+                **inputs,
+                max_new_tokens=256,
+                do_sample=False,
+                num_beams=1,
+            )
+        else:
+            generated_tokens = model.generate(
+                **inputs,
+                max_new_tokens=256,
+                do_sample=False,
+                num_beams=1,
+            )
 
         # slices off the input prompt tokens
         decoded_outputs = processor.batch_decode(
@@ -50,31 +75,18 @@ def main():
     manifest_path = config.manifest
     sample_rate = 16000
 
-    # Device
+    # Device Setup
     device = torch.device(
         f"cuda:{int(config.device)}" if torch.cuda.is_available() else "cpu"
     )
-    print(f"Using device: {device}")
+    logger.info("Using device: %s", device)
 
-    # Load model & processor
-
-    print(f"Loading base model: {config.model}")
+    # Load Processor
+    logger.info("Loading processor: %s", config.model)
     processor = VoxtralProcessor.from_pretrained(config.model)
-    base_model = VoxtralForConditionalGeneration.from_pretrained(
-        config.model,
-        torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-    ).to(device)
 
-    # Check if checkpoint contains LoRA adapter
-    adapter_config = os.path.join(config.checkpoint_path, "adapter_config.json")
-    if os.path.exists(adapter_config):
-        print(f"Detected LoRA adapter at {config.checkpoint_path} — loading it...")
-        model = PeftModel.from_pretrained(base_model, config.checkpoint_path)
-    else:
-        print("No adapter_config.json found — assuming full model checkpoint.")
-        model = base_model
-
-    model.eval()
+    # Load Model (handles all checkpoint types)
+    model, is_task_routing = load_model_for_evaluation(config, device, logger)
 
     # Load dataset
     dataset = load_eval_asr_manifest_dataset(manifest_path, sample_rate=sample_rate)
@@ -97,8 +109,14 @@ def main():
                 lang = sample["source"]["lang"]
 
             # Run transcription
-            prediction = transcribe_batch(
-                model, config.model, processor, audio, LANGCODE_MAP[lang], device
+            prediction = transcribe_sample(
+                model,
+                config.model,
+                processor,
+                audio,
+                LANGCODE_MAP[lang],
+                device,
+                is_task_routing,
             )[0].strip()
 
             # Compute WER and CER for this example
