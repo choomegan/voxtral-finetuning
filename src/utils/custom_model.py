@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import VoxtralForConditionalGeneration
 from utils.constants import TASKTYPE2ID
+from utils.loss import FocalLoss
 
 logging.basicConfig(
     level=logging.INFO,  # or DEBUG for more verbose logs
@@ -53,7 +54,13 @@ class VoxtralWithTaskTokenRouting(nn.Module):
     - Routes others to full generative model
     """
 
-    def __init__(self, base_model, num_languages, hidden_size):
+    def __init__(
+        self,
+        base_model,
+        lid_class_weights=None,
+        use_focal_loss=False,
+        focal_gamma=2.0,
+    ):
         super().__init__()
         self.base_model = base_model
         self.lid_loss_weight = 0.3  # FIXME: to be customised next time
@@ -65,6 +72,16 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         ), "Base model must have lid_head for task routing"
 
         logger.info("✅ Using LID head from VoxtralForConditionalGenerationWithLID")
+
+        # Create LID loss function
+        if use_focal_loss:
+            self.lid_loss_fn = FocalLoss(alpha=lid_class_weights, gamma=focal_gamma)
+        else:
+            # Store weights for cross entropy
+            if lid_class_weights is not None:
+                self.register_buffer("lid_class_weights", lid_class_weights)
+            else:
+                self.lid_class_weights = None
 
     def set_task_token_ids(self, task_token_ids):
         """Set task token IDs after tokenizer initialization."""
@@ -130,7 +147,27 @@ class VoxtralWithTaskTokenRouting(nn.Module):
             # Compute loss if labels provided
             if source_lang is not None:
                 lid_labels = source_lang[lid_indices]
-                lid_loss = F.cross_entropy(lid_logits, lid_labels)
+                # Use configured loss function
+
+                # ┌─────────────────────────────────────────────┐
+                # │ TIER 1: Check for Focal Loss (Priority 1)   │
+                # └─────────────────────────────────────────────┘
+                if hasattr(self, "lid_loss_fn"):
+                    lid_loss = self.lid_loss_fn(lid_logits, lid_labels)
+
+                # ┌─────────────────────────────────────────────┐
+                # │ TIER 2: Check for Class Weights (Priority 2)│
+                # └─────────────────────────────────────────────┘
+                elif self.lid_class_weights is not None:
+                    lid_loss = F.cross_entropy(
+                        lid_logits, lid_labels, weight=self.lid_class_weights
+                    )
+                # ┌─────────────────────────────────────────────┐
+                # │ TIER 3: Fallback to Standard CE (Priority 3)│
+                # └─────────────────────────────────────────────┘
+                else:
+                    lid_loss = F.cross_entropy(lid_logits, lid_labels)
+
                 outputs["lid_loss"] = lid_loss
                 outputs["lid_logits"] = lid_logits
 

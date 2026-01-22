@@ -27,7 +27,10 @@ from utils.collators import (
     StreamingT2TCollator,
     StreamingLIDCollator,
 )
-from utils.dataset_utils import load_preprocessed_multitask_dataset
+from utils.dataset_utils import (
+    load_preprocessed_multitask_dataset,
+    compute_lid_class_weights,
+)
 from utils.train_utils import SafeTrainer
 from utils.custom_model import (
     VoxtralWithTaskTokenRouting,
@@ -117,8 +120,9 @@ def create_model(config, processor, device):
 
         model = VoxtralWithTaskTokenRouting(
             base_model=base_model,
-            num_languages=len(SRCLANG2ID),
-            hidden_size=base_model.audio_tower.config.hidden_size,
+            lid_class_weights=lid_class_weights,
+            use_focal_loss=config.tasks.lid.focal_loss.enabled,
+            focal_gamma=config.tasks.lid.focal_loss.gamma,
         )
 
         logger.info("✅ Initialized task routing model")
@@ -276,6 +280,17 @@ def main():
         norm_factor = sum(lang_weights.values())
         lang_weights = {lang: w / norm_factor for lang, w in lang_weights.items()}
         logger.info("Normalized language weights: %s", lang_weights)
+
+    # --- LID classification class weighting ---
+    if config.tasks.lid.enabled and (
+        config.tasks.lid.focal_loss.enabled or config.trainer.focal_loss.enabled
+    ):
+        logger.info("✅ Adding class weighting for LID task")
+        lid_class_weights = compute_lid_class_weights(
+            train_dataset, method="inverse_freq"
+        )
+    else:
+        lid_class_weights = None
 
     # --- Model ---
     model = create_model(config, processor, device)

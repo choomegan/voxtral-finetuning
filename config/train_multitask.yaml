@@ -21,10 +21,14 @@ tasks:
     enabled: True
   lid:  
     enabled: True
+    class_weighting: True
+    focal_loss:
+      enabled: True
+      gamma: 2.0
 
 trainer:
   # Whether or not to add task routing in trainer. Need to set to True for LID.
-  use_task_routing: False
+  use_task_routing: True
 
   ### Loss manipulation
   lang_class_weighting: False
