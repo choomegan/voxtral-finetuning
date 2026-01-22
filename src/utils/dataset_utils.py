@@ -5,6 +5,8 @@ Helper functions for dataset loading
 import logging
 import json
 import os
+import torch
+from collections import Counter
 from typing import Tuple
 from datasets import Audio, Dataset, interleave_datasets
 from utils.preprocess_utils import (
@@ -370,3 +372,139 @@ def load_eval_lid_manifest_dataset(manifest_path: str) -> Dataset:
     logger.info("Loaded %d samples from %s", len(dataset), manifest_path)
 
     return dataset
+
+
+def compute_lid_class_weights(
+    train_dataset: Dataset,
+    method: str = "inverse_freq",
+    beta: float = 0.9999,
+    normalize: bool = True,
+) -> torch.Tensor:
+    """
+    Compute class weights for LID task from multitask training dataset.
+
+    Args:
+        train_dataset: Interleaved multitask dataset containing LID samples
+        method: Weighting method
+            - 'inverse_freq': Weight = Total / (num_classes * count_per_class)
+            - 'effective_samples': Weight = (1-beta) / (1-beta^n) [better for extreme imbalance]
+            - 'sqrt_inverse_freq': Weight = sqrt(Total / count_per_class) [softer balancing]
+        beta: Hyperparameter for effective_samples method (0.9999 recommended)
+        normalize: Whether to normalize weights to sum to num_classes
+
+    Returns:
+        torch.Tensor: Class weights [num_classes], where index corresponds to SRCLANG2ID values
+    """
+    logger.info(f"Computing LID class weights using method: {method}")
+
+    # ================================================
+    # Step 1: Extract LID samples from multitask dataset
+    # ================================================
+    # Filter only LID task samples
+    lid_samples = train_dataset.filter(
+        lambda x: x.get("task") == "lid", desc="Filtering LID samples"
+    )
+
+    num_lid_samples = len(lid_samples)
+    if num_lid_samples == 0:
+        logger.warning("⚠️  No LID samples found in training dataset!")
+        return torch.ones(len(SRCLANG2ID))
+
+    logger.info(f"Found {num_lid_samples} LID samples in training set")
+
+    # ================================================
+    # Step 2: Count samples per language
+    # ================================================
+    # Get all source_lang values (these are language strings like 'zsm', 'ind')
+    lang_counts = Counter(lid_samples["source_lang"])
+
+    logger.info(f"Language distribution in LID samples:")
+    for lang, count in sorted(lang_counts.items()):
+        percentage = 100 * count / num_lid_samples
+        logger.info(f"  {lang}: {count:,} samples ({percentage:.2f}%)")
+
+    # ================================================
+    # Step 3: Convert to tensor indexed by SRCLANG2ID
+    # ================================================
+    num_classes = len(SRCLANG2ID)
+    counts = torch.zeros(num_classes, dtype=torch.float32)
+
+    for lang, count in lang_counts.items():
+        if lang not in SRCLANG2ID:
+            logger.warning(f"⚠️  Unknown language '{lang}' found in dataset, skipping")
+            continue
+        lang_id = SRCLANG2ID[lang]
+        counts[lang_id] = count
+
+    # Check for zero counts (languages in SRCLANG2ID but not in data)
+    zero_count_langs = [
+        lang for lang, lang_id in SRCLANG2ID.items() if counts[lang_id] == 0
+    ]
+    if zero_count_langs:
+        logger.warning(
+            f"⚠️  Languages in SRCLANG2ID but not in training data: {zero_count_langs}"
+        )
+
+    # ================================================
+    # Step 4: Compute weights based on method
+    # ================================================
+    total_samples = counts.sum()
+
+    if method == "inverse_freq":
+        # Standard inverse frequency: w_i = N / (K * n_i)
+        # N = total samples, K = num classes, n_i = samples in class i
+        weights = total_samples / (num_classes * counts.clamp(min=1))
+
+        if normalize:
+            weights = weights / weights.mean()
+
+    elif method == "effective_samples":
+        # Effective number of samples (Cui et al., 2019)
+        # "Class-Balanced Loss Based on Effective Number of Samples"
+        # w_i = (1 - beta) / (1 - beta^n_i)
+        # Better for extreme imbalance (e.g., 1000:1 ratio)
+        effective_num = 1.0 - torch.pow(beta, counts)
+        weights = (1.0 - beta) / effective_num.clamp(min=1e-7)
+
+        if normalize:
+            weights = weights / weights.mean()
+
+    elif method == "sqrt_inverse_freq":
+        # Softer balancing: w_i = sqrt(N / n_i)
+        # Less aggressive than full inverse frequency
+        weights = torch.sqrt(total_samples / counts.clamp(min=1))
+
+        if normalize:
+            weights = weights / weights.mean()
+
+    else:
+        raise ValueError(
+            f"Unknown method '{method}'. "
+            f"Choose from: 'inverse_freq', 'effective_samples', 'sqrt_inverse_freq'"
+        )
+
+    # ================================================
+    # Step 5: Log final weights
+    # ================================================
+    logger.info(f"Computed class weights ({method}):")
+    id2lang = {v: k for k, v in SRCLANG2ID.items()}
+
+    for lang_id, weight in enumerate(weights):
+        lang = id2lang.get(lang_id, f"UNKNOWN_{lang_id}")
+        count = int(counts[lang_id].item())
+
+        if count > 0:
+            logger.info(
+                f"  {lang} (id={lang_id}): weight={weight:.4f}, count={count:,}"
+            )
+        else:
+            logger.info(
+                f"  {lang} (id={lang_id}): weight={weight:.4f}, count=0 (NOT IN DATA)"
+            )
+
+    # Log weight ratio for reference
+    if weights.numel() == 2 and (weights > 0).all():
+        ratio = weights.max() / weights.min()
+        logger.info(f"Weight ratio (max/min): {ratio:.2f}x")
+
+    return weights
