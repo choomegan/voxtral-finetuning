@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 # --- 1. Define the Unified Schema ---
-def get_base_entry(task_name):
+def get_base_entry(task_name: str):
     """
     Returns a template dictionary with ALL possible columns for ALL tasks.
     This ensures interleave_datasets never drops data due to schema mismatch.
