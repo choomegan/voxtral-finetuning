@@ -1,0 +1,5 @@
+model: mistralai/Voxtral-Mini-3B-2507
+checkpoint_path: /mnt/d/MEGAN/code/voxtral-finetuning/experiments/TESTING_LID_INTEGRATION_2_20260120_163524/checkpoint-40
+manifest: /mnt/d/MEGAN/data/moofoo_s2tt/ms/eval_testing.json
+output_path: ./eval_results/TEST_LID.json
+device: 0
