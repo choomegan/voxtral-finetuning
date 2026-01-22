@@ -1,5 +1,5 @@
 """
-Multitask finetuning for ASR,, ST, T2T, and LID
+Multitask finetuning for ASR, ST, T2T, and LID
 """
 
 import logging
@@ -47,7 +47,20 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)  # module-level logger
 
 
-def create_model(config, processor, device):
+def validate_config(config):
+    """
+    Validate mutually dependent config options.
+    """
+    if config.tasks.lid.enabled and not config.trainer.use_task_routing:
+        raise ValueError(
+            "Invalid configuration: LID is enabled (tasks.lid.enabled=True) "
+            "but task routing is disabled (trainer.use_task_routing=False). "
+            "LID requires task routing to prevent LID samples from passing "
+            "through the LM head."
+        )
+
+
+def create_model(config, processor, device, lid_class_weights=None):
     """
     Create model with optional task token routing and LoRA.
 
@@ -127,7 +140,6 @@ def create_model(config, processor, device):
 
         logger.info("✅ Initialized task routing model")
     else:
-        logger.info("📝 Using original prompt-based approach (no task tokens)")
         model = base_model
 
     # NEED TO UNFREEZE TASK SPECIFI HEADS! Peft will freeze the whole base model automatically
@@ -208,6 +220,7 @@ def _initialize_collators(config, processor, model_id: str):
 def main():
     accelerator = Accelerator()
     config = OmegaConf.load("config/train_multitask.yaml")
+    validate_config(config)
 
     # --- Setup WandB ---
     if config.exp_manager.logger == "wandb" and accelerator.is_main_process:
@@ -293,7 +306,7 @@ def main():
         lid_class_weights = None
 
     # --- Model ---
-    model = create_model(config, processor, device)
+    model = create_model(config, processor, device, lid_class_weights)
 
     # --- Collators ---
     multi_collator = _initialize_collators(
