@@ -14,8 +14,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import Trainer
+from sklearn.metrics import precision_recall_fscore_support, precision_recall_curve, auc
 
-from utils.constants import SRCLANG2ID, TASKTYPE2ID, ID2SRCLANG
+from utils.constants import SRCLANG2ID, TASKTYPE2ID
 from utils.pcgrad import PCGrad
 from utils.custom_model import VoxtralWithTaskTokenRouting
 
@@ -503,21 +504,22 @@ class SafeTrainer(Trainer):
         """
         Custom evaluation for LID classification task.
 
-        Returns accuracy and loss metrics instead of generation metrics.
+        Computes:
+        - Per-language precision
+        - Per-language recall
+        - Average LID loss
         """
-        model.eval()
 
-        # Create dataloader for LID dataset
+        model.eval()
         dataloader = self.get_eval_dataloader(dataset)
 
-        total_samples = 0
-        total_correct = 0
         total_loss = 0.0
         num_batches = 0
+        total_samples = 0
 
-        # Per-language accuracy tracking
-        lang_correct = {lang_id: 0 for lang_id in range(len(SRCLANG2ID))}
-        lang_total = {lang_id: 0 for lang_id in range(len(SRCLANG2ID))}
+        all_predictions = []  # Predicted class IDs
+        all_targets = []  # True class IDs
+        all_probs = []  # probability distributions for PR-AUC
 
         logger.info(f"🔍 Evaluating LID: {len(dataset)} samples")
 
@@ -526,71 +528,89 @@ class SafeTrainer(Trainer):
                 if batch is None:
                     continue
 
-                # Move to device
                 batch = self._prepare_inputs(batch)
 
-                # Forward pass
                 outputs = model(**batch)
-
-                # Get predictions and ground truth
                 lid_logits = outputs.get("lid_logits")
+                probs = lid_logits.softmax(dim=-1)  # [B]
+
                 if lid_logits is None:
                     logger.warning("⚠️ No lid_logits in model output")
                     continue
 
                 predictions = lid_logits.argmax(dim=-1)  # [B]
                 targets = batch["source_lang"]  # [B]
-                for i, (pred, tgt) in enumerate(zip(predictions, targets)):
-                    pred_lang = ID2SRCLANG.get(pred.item(), "UNKNOWN")
-                    tgt_lang = ID2SRCLANG.get(tgt.item(), "UNKNOWN")
-                    logger.debug(
-                        f"Sample {i}: pred={pred_lang}({pred.item()}), target={tgt_lang}({tgt.item()})"
-                    )
 
-                # Compute metrics
-                correct = (predictions == targets).sum().item()
-                total_correct += correct
-                total_samples += len(targets)
+                all_predictions.append(predictions.cpu())
+                all_targets.append(targets.cpu())
+                all_probs.append(probs.cpu())
 
-                # Per-language accuracy
-                for pred, target in zip(
-                    predictions.cpu().numpy(), targets.cpu().numpy()
-                ):
-                    lang_total[target] += 1
-                    if pred == target:
-                        lang_correct[target] += 1
+                total_samples += targets.size(0)
 
-                # Accumulate loss
                 if "lid_loss" in outputs:
                     total_loss += outputs["lid_loss"].item()
                     num_batches += 1
 
-        # Compute overall accuracy
-        accuracy = total_correct / total_samples if total_samples > 0 else 0.0
-        avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+        if total_samples == 0:
+            logger.warning("⚠️ No valid LID samples evaluated")
+            return {
+                f"{metric_key_prefix}_loss": 0.0,
+                f"{metric_key_prefix}_samples": 0,
+            }
 
-        # Compute per-language accuracy
+        y_pred = torch.cat(all_predictions).numpy()  # [N]
+        y_true = torch.cat(all_targets).numpy()  # [N]
+        y_prob = torch.cat(all_probs).numpy()  # [N, num_langs]
+
+        num_langs = len(SRCLANG2ID)
         id2lang = {v: k for k, v in SRCLANG2ID.items()}
-        lang_accuracies = {}
-        for lang_id, total in lang_total.items():
-            if total > 0:
-                lang_name = id2lang.get(lang_id, f"lang_{lang_id}")
-                acc = lang_correct[lang_id] / total
-                lang_accuracies[f"{metric_key_prefix}_acc_{lang_name}"] = acc
 
-        # Return metrics
+        # =============== PRECISION-RECALL CALCULATION ===============
+        precision, recall, _, _ = precision_recall_fscore_support(
+            y_true,
+            y_pred,
+            labels=list(range(num_langs)),
+            zero_division=0,
+        )
+
+        # ================== PR-AUC CALCULATION ==================
+        pr_aucs = []
+
+        for lang_id in range(num_langs):
+            # Binary classification: current language vs all others
+            y_true_binary = (y_true == lang_id).astype(int)
+            y_scores = y_prob[:, lang_id]  # Probability for this language
+
+            # Skip if no positive samples exist
+            if y_true_binary.sum() == 0:
+                pr_auc = 0.0
+            else:
+                # Calculate precision-recall curve
+                prec_curve, rec_curve, _ = precision_recall_curve(
+                    y_true_binary, y_scores
+                )
+                # Calculate area under PR curve
+                pr_auc = auc(rec_curve, prec_curve)
+
+            pr_aucs.append(pr_auc)
+
         metrics = {
-            f"{metric_key_prefix}_loss": avg_loss,
-            f"{metric_key_prefix}_accuracy": accuracy,
+            f"{metric_key_prefix}_loss": (
+                total_loss / num_batches if num_batches > 0 else 0.0
+            ),
             f"{metric_key_prefix}_samples": total_samples,
         }
 
-        # Add per-language accuracies
-        metrics.update(lang_accuracies)
+        # Per-language metrics
+        for lang_id in range(num_langs):
+            lang_name = id2lang.get(lang_id, f"lang_{lang_id}")
+            metrics[f"{metric_key_prefix}_precision_{lang_name}"] = float(
+                precision[lang_id]
+            )
+            metrics[f"{metric_key_prefix}_recall_{lang_name}"] = float(recall[lang_id])
+            metrics[f"{metric_key_prefix}_pr_auc_{lang_name}"] = float(pr_aucs[lang_id])
 
-        logger.info(
-            f"✓ LID Evaluation: Accuracy={accuracy:.4f}, Loss={avg_loss:.4f}, Samples={total_samples}"
-        )
+        logger.info("✓ LID Evaluation complete (per-language precision & recall)")
 
         return metrics
 
@@ -724,11 +744,13 @@ class SafeTrainer(Trainer):
     def _save(self, output_dir: Optional[str] = None, state_dict=None):
         """
         Override internal _save to handle task routing wrapper with PEFT.
-
         This prevents saving the full 9GB model when using LoRA.
         """
         output_dir = output_dir if output_dir is not None else self.args.output_dir
-        os.makedirs(output_dir, exist_ok=True)
+
+        # Only save on main process
+        if not self.is_world_process_zero():
+            return
 
         # Get the actual model (unwrap DDP/FSDP)
         model_to_save = self.model
@@ -802,6 +824,18 @@ class SafeTrainer(Trainer):
         else:
             logger.info("📦 Saving full model (not PEFT)...")
             super()._save(output_dir, state_dict)
+            return  # Parent already saved everything
+
+        # =========================
+        # Save Tokenizer & Config (CRITICAL!)
+        # =========================
+        # The parent class normally handles this, but since we're not calling it
+        # for PEFT models, we need to save these ourselves
+        if self.tokenizer is not None:
+            self.tokenizer.save_pretrained(output_dir)
+
+        # Save the training arguments
+        torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
 
         # Log checkpoint size
         total_size = sum(
@@ -811,21 +845,21 @@ class SafeTrainer(Trainer):
         )
         logger.info(f"💾 Checkpoint size: {total_size / 1e6:.1f}MB")
 
-    def save_model(self, output_dir: Optional[str] = None, _internal_call=False):
-        """
-        Override save_model to use our custom _save logic.
-        """
-        if output_dir is None:
-            output_dir = self.args.output_dir
+    # def save_model(self, output_dir: Optional[str] = None, _internal_call=False):
+    #     """
+    #     Override save_model to use our custom _save logic.
+    #     """
+    #     if output_dir is None:
+    #         output_dir = self.args.output_dir
 
-        # Call our custom _save
-        self._save(output_dir)
+    #     # Call our custom _save
+    #     self._save(output_dir)
 
-        # Save trainer state (required by Trainer)
-        if self.args.should_save:
-            # Save tokenizer/processor
-            if self.tokenizer is not None:
-                self.tokenizer.save_pretrained(output_dir)
+    #     # Save trainer state (required by Trainer)
+    #     if self.args.should_save:
+    #         # Save tokenizer/processor
+    #         if self.tokenizer is not None:
+    #             self.tokenizer.save_pretrained(output_dir)
 
-            # Save training args
-            torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
+    #         # Save training args
+    #         torch.save(self.args, os.path.join(output_dir, "training_args.bin"))
