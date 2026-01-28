@@ -218,6 +218,10 @@ def _initialize_collators(config, processor, model_id: str):
 
 
 def main():
+    # Generate timestamp at the very start (before Accelerator spawns processes)
+    # This gets evaluated once in the parent process, then inherited by all children
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     accelerator = Accelerator()
     config = OmegaConf.load("config/train_multitask.yaml")
     validate_config(config)
@@ -235,10 +239,16 @@ def main():
                 project=config.exp_manager.wandb.project,
                 name=config.exp_manager.name,
             )
+
     # --- Experiment name ---
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     exp_name = f"{config.exp_manager.name}_{timestamp}"
     output_dir = os.path.join(config.exp_manager.exp_dir, exp_name)
+
+    # Create directory on main process
+    if accelerator.is_main_process:
+        os.makedirs(output_dir, exist_ok=True)
+
+    accelerator.wait_for_everyone()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info("Using device: %s", device)
@@ -332,7 +342,7 @@ def main():
         save_strategy="steps",
         eval_strategy="steps",
         save_total_limit=config.trainer.save_total_limit,
-        load_best_model_at_end=True,
+        # load_best_model_at_end=True,
         metric_for_best_model="eval_combined_loss",
         greater_is_better=False,
         report_to=config.exp_manager.logger,
