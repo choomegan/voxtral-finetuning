@@ -143,6 +143,7 @@ class VoxtralWithTaskTokenRouting(nn.Module):
             lid_logits = self.base_model.lid_head(
                 pooled_features
             )  # [B_lid, num_languages]
+            outputs["lid_logits"] = lid_logits
 
             # Compute loss if labels provided
             if source_lang is not None:
@@ -169,7 +170,6 @@ class VoxtralWithTaskTokenRouting(nn.Module):
                     lid_loss = F.cross_entropy(lid_logits, lid_labels)
 
                 outputs["lid_loss"] = lid_loss
-                outputs["lid_logits"] = lid_logits
 
         # ====================================
         # Route 2: Generative Tasks
