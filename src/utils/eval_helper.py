@@ -100,17 +100,8 @@ def load_model_for_evaluation(config, device, logger):
     if is_task_routing:
         logger.info("Wrapping with VoxtralWithTaskTokenRouting...")
 
-        # Get hidden size from correct location
-        if hasattr(base_model, "base_model"):
-            # PEFT wrapped
-            hidden_size = base_model.base_model.model.audio_tower.config.hidden_size
-        else:
-            hidden_size = base_model.audio_tower.config.hidden_size
-
         model = VoxtralWithTaskTokenRouting(
             base_model=base_model,
-            num_languages=len(SRCLANG2ID),
-            hidden_size=hidden_size,
         )
         model.to(device)
         logger.info("✅ Task routing wrapper applied")
