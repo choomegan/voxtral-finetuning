@@ -63,7 +63,7 @@ class VoxtralWithTaskTokenRouting(nn.Module):
     ):
         super().__init__()
         self.base_model = base_model
-        self.lid_loss_weight = 0.3  # FIXME: to be customised next time
+        self.lid_loss_weight = 1.0  # FIXME: to be customised next time
         self.gen_loss_weight = 1.0
 
         # Use LID head from base model
@@ -88,6 +88,25 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         self.task_token_ids = task_token_ids
         logger.info(f"Task token IDs set: {task_token_ids}")
 
+    def _pool_audio(self, audio_features, audio_lengths, mel_lengths):
+        """
+        Pool audio features over time dimension using scaled lengths. Scaled lengths
+        are required as the audio tower upsamples the time dimension.
+        """
+        T_enc = audio_features.size(1)
+        dtype = audio_features.dtype  # Capture the model's dtype (BFloat16)
+        scale = float(T_enc) / float(mel_lengths)
+        logger.debug(f"LID scale factor: {scale:.3f}")
+
+        enc_lengths = (audio_lengths.float() * scale).round().clamp(min=1).long()
+        mask = (
+            torch.arange(T_enc, device=audio_features.device)[None, :]
+            < enc_lengths[:, None]
+        ).to(dtype)
+
+        pooled = (audio_features * mask.unsqueeze(-1)).sum(dim=1)
+        return pooled / enc_lengths.unsqueeze(-1).to(dtype)
+
     def forward(
         self,
         input_features=None,
@@ -96,6 +115,7 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         labels=None,
         source_lang=None,  # Ground truth for LID
         task_type=None,
+        audio_lengths=None,
         **kwargs,
     ):
         """
@@ -134,10 +154,16 @@ class VoxtralWithTaskTokenRouting(nn.Module):
 
             # Forward through audio encoder
             audio_outputs = self.base_model.audio_tower(lid_audio)
-            audio_features = audio_outputs.last_hidden_state  # [B_lid, T, H]
+            audio_features = (
+                audio_outputs.last_hidden_state
+            )  # [B_lid, Time frames, Hidden size]
 
-            # Pool over time dimension
-            pooled_features = audio_features.mean(dim=1)  # [B_lid, H]
+            # Pool audio features
+            pooled_features = self._pool_audio(
+                audio_features,
+                audio_lengths[lid_indices],
+                mel_lengths=lid_audio.size(-1),
+            )  # [B_lid, Hidden size]
 
             # Classification
             lid_logits = self.base_model.lid_head(
@@ -212,6 +238,20 @@ class VoxtralWithTaskTokenRouting(nn.Module):
 
         return outputs
 
+    def _get_base_voxtral(self):
+        """Recursively unwraps PeftModel to get the core Voxtral model."""
+        model = self.base_model
+        # PeftModel wraps the core model in .base_model.model
+        if hasattr(model, "base_model") and hasattr(model.base_model, "model"):
+            return model.base_model.model
+        return model
+
+    def _get_lid_head(self):
+        return self._get_base_voxtral().lid_head
+
+    def _get_audio_tower(self):
+        return self._get_base_voxtral().audio_tower
+
     @torch.no_grad()
     def generate(
         self,
@@ -219,6 +259,8 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         input_features=None,
         attention_mask=None,
         task_type=None,
+        audio_lengths=None,
+        return_lid_logits=False,
         **generation_kwargs,
     ):
         """
@@ -229,10 +271,20 @@ class VoxtralWithTaskTokenRouting(nn.Module):
         # If all samples are LID, do classification instead of generation
         if lid_mask.all():
             # All LID - return classification results
-            audio_outputs = self.base_model.audio_tower(input_features)
+            audio_tower = self._get_audio_tower()
+            audio_outputs = audio_tower(input_features)
             audio_features = audio_outputs.last_hidden_state
-            pooled_features = audio_features.mean(dim=1)
-            lid_logits = self.base_model.lid_head(pooled_features)
+
+            # Pool audio features
+            pooled_features = self._pool_audio(
+                audio_features,
+                audio_lengths,
+                mel_lengths=input_features.size(-1),  # original mel length
+            )  # [B_lid, Hidden size]
+
+            lid_logits = self._get_lid_head()(pooled_features)
+            if return_lid_logits:
+                return lid_logits  # [B, num_languages]
 
             # Return predicted class IDs (mimicking generated token IDs)
             pred_classes = lid_logits.argmax(dim=-1, keepdim=True)  # [B, 1]
