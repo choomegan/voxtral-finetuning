@@ -264,9 +264,11 @@ class StreamingLIDCollator:
                 audios,
                 sampling_rate=self.sample_rate,
                 return_tensors="pt",
-                padding="max_length",  # Changed from True
-                max_length=self.EXPECTED_MEL_LENGTH,
-                truncation=True,  # Truncate if longer than 3000
+            )
+
+            lengths = torch.tensor(
+                [audio.shape[-1] for audio in audio_features.input_features],
+                dtype=torch.long,
             )
 
             # Manual padding to 3000
@@ -288,7 +290,7 @@ class StreamingLIDCollator:
             # The model will route based on task_type and ignore these
             # ============================================================
             input_ids = torch.full((batch_size, 1), self.pad_id, dtype=torch.long)
-            attention_mask = torch.ones((batch_size, 1), dtype=torch.long)
+            attention_mask = torch.zeros((batch_size, 1), dtype=torch.long)
 
             # Dummy labels (model ignores these for LID task)
             labels = torch.full((batch_size, 1), -100, dtype=torch.long)
@@ -304,6 +306,7 @@ class StreamingLIDCollator:
                 "attention_mask": attention_mask,  # Dummy
                 "labels": labels,  # Dummy -100 (ignored by model)
                 "input_features": input_features,
+                "audio_lengths": lengths,  # for proper pooling for LID
                 "source_lang": source_lang,  # TRUE classification targets
                 "task_type": torch.tensor(
                     [self.TASK_ID] * batch_size, dtype=torch.long
@@ -547,6 +550,29 @@ class StreamingMultiTaskCollator:
             tensors.append(tensor)
         return torch.cat(tensors, dim=0)
 
+    def _merge_audio_lengths(self, batches):
+        """
+        Merge audio_lengths across batches, which is used for LID pooling.
+        Non-lid tasks get dummy zeros.
+        """
+        all_lengths = []
+
+        for batch in batches:
+            lengths = batch.get("audio_lengths")
+
+            if lengths is not None:
+                all_lengths.append(lengths)
+            else:
+                # Dummy zeros for non-LID / non-audio tasks
+                dummy = torch.zeros(
+                    batch["input_ids"].size(0),
+                    dtype=torch.long,
+                    device=batch["input_ids"].device,
+                )
+                all_lengths.append(dummy)
+
+        return torch.cat(all_lengths, dim=0)
+
     def _merge_batches(self, batches: List[Dict]) -> Dict:
         """
         Merge multiple task batches into one.
@@ -565,6 +591,7 @@ class StreamingMultiTaskCollator:
             "labels": self._pad_and_concat(batches, "labels", -100, max_seq_len),
             # Simplified audio merging call
             "input_features": self._merge_audio_features(batches),
+            "audio_lengths": self._merge_audio_lengths(batches),
             "source_lang": torch.cat([b["source_lang"] for b in batches], dim=0),
             "task_type": torch.cat([b["task_type"] for b in batches], dim=0),
         }
